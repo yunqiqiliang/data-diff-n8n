@@ -46,6 +46,7 @@ pyodbc = {version=">=4.0.39", optional=true}
 typing-extensions = ">=4.0.1"
 attrs = ">=23.1.0"
 mashumaro = {version = ">=2.9,<3.11.0", extras = ["msgpack"]}
+clickzetta-connector = {version = ">=0.8.51", optional=true}
 
 [tool.poetry.dev-dependencies]
 parameterized = "*"
@@ -62,6 +63,7 @@ vertica-python = "*"
 duckdb = ">=0.9.0"
 dbt-core = ">=1.0.0"
 ruff = ">=0.1.4"
+clickzetta = ["clickzetta-connector"]
 # google-cloud-bigquery = "*"
 # databricks-sql-connector = "*"
 
