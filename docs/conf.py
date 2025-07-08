@@ -59,7 +59,7 @@ source_suffix = {".rst": "restructuredtext", ".md": "markdown"}
 master_doc = "index"
 
 # General information about the project.
-project = "data-diff"
+project = "data-diff-n8n"
 copyright = "Datafold"
 author = "Erez Shinan"
 

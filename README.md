@@ -2,14 +2,14 @@
 
 ---
 
-# data-diff: Compare datasets fast, within or across SQL databases
+# data-diff-n8n: Compare datasets fast, within or across SQL databases
 
 ## Contributors
 
-<a href="https://github.com/datafold/data-diff/graphs/contributors">
-  <img src="https://contributors-img.web.app/image?repo=datafold/data-diff" />
+<a href="https://github.com/yunqiqiliang/data-diff-n8n/graphs/contributors">
+  <img src="https://contributors-img.web.app/image?repo=yunqiqiliang/data-diff-n8n" />
 </a>
 
 ## License
 
-This project is licensed under the terms of the [MIT License](https://github.com/datafold/data-diff/blob/master/LICENSE).
+This project is licensed under the terms of the [MIT License](https://github.com/yunqiqiliang/data-diff-n8n/blob/master/LICENSE).

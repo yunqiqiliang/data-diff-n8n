@@ -34,7 +34,7 @@ The same goes for other technical requests, like missing features, or gaps in th
 
 See [issues](/datafold/data-diff/issues/).
 
-For questions, and non-technical discussions, see [discussions](https://github.com/datafold/data-diff/discussions).
+For questions, and non-technical discussions, see [discussions](https://github.com/yunqiqiliang/data-diff-n8n/discussions).
 
 ### Contributing code
 
@@ -46,7 +46,7 @@ When in doubt, use the existing code as a guideline, or ask.
 
 #### Get started (setup)
 
-To get started, first clone the repository. For example `git clone https://github.com/datafold/data-diff`.
+To get started, first clone the repository. For example `git clone https://github.com/yunqiqiliang/data-diff-n8n`.
 
 Once inside, you can install the dependencies.
 

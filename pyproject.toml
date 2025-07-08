@@ -1,11 +1,11 @@
 [tool.poetry]
-name = "data-diff"
+name = "data-diff-n8n"
 version = "0.11.2"
 description = "Command-line tool and Python library to efficiently diff rows across two different databases."
 authors = ["Datafold <data-diff@datafold.com>"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/datafold/data-diff"
+repository = "https://github.com/yunqiqiliang/data-diff-n8n"
 classifiers = [
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
