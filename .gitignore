@@ -152,3 +152,4 @@ benchmark_*.png
 .history
 
 docker-compose-local.yml
+/n8n/node_modules

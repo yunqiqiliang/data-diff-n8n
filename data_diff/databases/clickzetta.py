@@ -17,7 +17,6 @@ from data_diff.abcs.database_types import (
     Boolean,
     Date,
 )
-from data_diff.abcs.mixins import AbstractMixin_MD5, AbstractMixin_NormalizeValue
 from data_diff.databases.base import (
     MD5_HEXDIGITS,
     CHECKSUM_HEXDIGITS,
@@ -25,8 +24,8 @@ from data_diff.databases.base import (
     ThreadedDatabase,
     import_helper,
     parse_table_name,
-    Mixin_RandomSample,
 )
+from data_diff.schema import RawColumnInfo
 
 
 @import_helper(text="You can install it using 'pip install clickzetta-connector'")
@@ -37,26 +36,7 @@ def import_clickzetta():
 
 
 @attrs.define(frozen=False)
-class Mixin_MD5(AbstractMixin_MD5):
-    def md5_as_int(self, s: str) -> str:
-        return f"cast(conv(substr(md5({s}), {1 + MD5_HEXDIGITS - CHECKSUM_HEXDIGITS}), 16, 10) as decimal(38, 0))"
-
-
-@attrs.define(frozen=False)
-class Mixin_NormalizeValue(AbstractMixin_NormalizeValue):
-    def normalize_timestamp(self, value: str, coltype: TemporalType) -> str:
-        precision_format = "S" * coltype.precision + "0" * (6 - coltype.precision)
-        return f"date_format({value}, 'yyyy-MM-dd HH:mm:ss.{precision_format}')"
-
-    def normalize_number(self, value: str, coltype: NumericType) -> str:
-        return self.to_string(f"cast({value} as decimal(38, {coltype.precision}))")
-
-    def normalize_boolean(self, value: str, _coltype: Boolean) -> str:
-        return self.to_string(f"cast ({value} as int)")
-
-
-@attrs.define(frozen=False)
-class Dialect(BaseDialect, Mixin_MD5, Mixin_NormalizeValue, AbstractMixin_MD5, AbstractMixin_NormalizeValue):
+class Dialect(BaseDialect):
     name = "Clickzetta"
     ROUNDS_ON_PREC_LOSS = True
     TYPE_CLASSES = {
@@ -79,6 +59,22 @@ class Dialect(BaseDialect, Mixin_MD5, Mixin_NormalizeValue, AbstractMixin_MD5, A
         # Boolean
         "BOOLEAN": Boolean,
     }
+
+    def md5_as_int(self, s: str) -> str:
+        return f"cast(conv(substr(md5({s}), {1 + MD5_HEXDIGITS - CHECKSUM_HEXDIGITS}), 16, 10) as decimal(38, 0))"
+
+    def md5_as_hex(self, s: str) -> str:
+        return f"md5({s})"
+
+    def normalize_timestamp(self, value: str, coltype: TemporalType) -> str:
+        precision_format = "S" * coltype.precision + "0" * (6 - coltype.precision)
+        return f"date_format({value}, 'yyyy-MM-dd HH:mm:ss.{precision_format}')"
+
+    def normalize_number(self, value: str, coltype: NumericType) -> str:
+        return self.to_string(f"cast({value} as decimal(38, {coltype.precision}))")
+
+    def normalize_boolean(self, value: str, _coltype: Boolean) -> str:
+        return self.to_string(f"cast ({value} as int)")
 
     def quote(self, s: str):
         return f"`{s}`"
@@ -136,7 +132,8 @@ class Clickzetta(ThreadedDatabase):
 
         workspace, schema, table = self._normalize_table_path(path)
         with conn.cursor() as cursor:
-            cursor.execute(f"show columns in {schema}.{table}")
+            # 注意：Clickzetta 的 SHOW COLUMNS 语法不需要 schema 前缀
+            cursor.execute(f"SHOW COLUMNS IN {table}")
             try:
                 rows = cursor.fetchall()
             finally:
@@ -144,6 +141,8 @@ class Clickzetta(ThreadedDatabase):
             if not rows:
                 raise RuntimeError(f"{self.name}: Table '{'.'.join(path)}' does not exist, or has no columns")
 
+            # SHOW COLUMNS 返回格式: (schema, table, column_name, column_type, comment)
+            # 我们需要 column_name 和 column_type
             d = {r[2]: (r[2], r[3].strip().split(' ')[0].upper(), None, None, None) for r in rows}
             assert len(d) == len(rows)
             return d
@@ -160,19 +159,37 @@ class Clickzetta(ThreadedDatabase):
             type_cls = self.dialect.TYPE_CLASSES.get(row_type, UnknownColType)
 
             if issubclass(type_cls, Integer):
-                row = (row[0], row_type, None, None, 0)
+                raw_info = RawColumnInfo(
+                    column_name=row[0],
+                    data_type=row_type,
+                    datetime_precision=None,
+                    numeric_precision=None,
+                    numeric_scale=0
+                )
 
             elif issubclass(type_cls, Decimal):
                 items = row[1][8:].rstrip(")").split(",")
                 numeric_precision, numeric_scale = int(items[0]), int(items[1])
-                row = (row[0], row_type, None, numeric_precision, numeric_scale)
+                raw_info = RawColumnInfo(
+                    column_name=row[0],
+                    data_type=row_type,
+                    datetime_precision=None,
+                    numeric_precision=numeric_precision,
+                    numeric_scale=numeric_scale
+                )
 
             else:
-                row = (row[0], row_type, None, None, None)
+                raw_info = RawColumnInfo(
+                    column_name=row[0],
+                    data_type=row_type,
+                    datetime_precision=None,
+                    numeric_precision=None,
+                    numeric_scale=None
+                )
 
-            resulted_rows.append(row)
+            resulted_rows.append(raw_info)
 
-        col_dict: Dict[str, ColType] = {row[0]: self.dialect.parse_type(path, *row) for row in resulted_rows}
+        col_dict: Dict[str, ColType] = {info.column_name: self.dialect.parse_type(path, info) for info in resulted_rows}
 
         self._refine_coltypes(path, col_dict, where)
         return col_dict

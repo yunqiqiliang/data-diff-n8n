@@ -1,0 +1,43 @@
+{
+  "name": "n8n-nodes-data-diff-clickzetta",
+  "version": "1.0.0",
+  "description": "N8N custom nodes for data comparison using data-diff with Clickzetta support",
+  "keywords": [
+    "n8n",
+    "n8n-community-node-package",
+    "data-diff",
+    "clickzetta",
+    "data-comparison",
+    "database"
+  ],
+  "license": "MIT",
+  "homepage": "https://github.com/yunqiqiliang/data-diff-n8n",
+  "author": {
+    "name": "Data-Diff N8N Team",
+    "email": "support@data-diff-n8n.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yunqiqiliang/data-diff-n8n.git"
+  },
+  "main": "index.js",
+  "files": [
+    "."
+  ],
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "credentials/ClickzettaApi.credentials.js",
+      "credentials/DataDiffConfig.credentials.js",
+      "credentials/DatabaseConnectorCredentials.credentials.js"
+    ],
+    "nodes": [
+      "nodes/ClickzettaConnector/ClickzettaConnector.node.js",
+      "nodes/DatabaseConnector/DatabaseConnector.node.js",
+      "nodes/DataComparison/DataComparison.node.js"
+    ]
+  },
+  "dependencies": {
+    "n8n-workflow": "^1.0.0"
+  }
+}
