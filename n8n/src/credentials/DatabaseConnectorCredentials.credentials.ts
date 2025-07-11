@@ -151,6 +151,18 @@ export class DatabaseConnectorCredentials implements ICredentialType {
 				},
 			},
 		},
+		{
+			displayName: 'Schema',
+			name: 'schema',
+			type: 'string',
+			default: 'public',
+			description: 'Database schema name',
+			displayOptions: {
+				show: {
+					databaseType: ['postgres', 'oracle', 'mssql', 'vertica'],
+				},
+			},
+		},
 		// Clickzetta 专用字段
 		{
 			displayName: 'Instance',
@@ -194,6 +206,18 @@ export class DatabaseConnectorCredentials implements ICredentialType {
 			type: 'string',
 			default: '',
 			description: 'Clickzetta virtual cluster name',
+			displayOptions: {
+				show: {
+					databaseType: ['clickzetta'],
+				},
+			},
+		},
+		{
+			displayName: 'Schema',
+			name: 'schema',
+			type: 'string',
+			default: 'public',
+			description: 'Database schema name',
 			displayOptions: {
 				show: {
 					databaseType: ['clickzetta'],

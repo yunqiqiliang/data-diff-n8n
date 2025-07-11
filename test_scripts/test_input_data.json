@@ -1,0 +1,29 @@
+[
+  {
+    "json": {
+      "connectionUrl": "postgresql://metabase:metasample123@106.120.41.178:5436/sample",
+      "databaseType": "postgresql",
+      "operation": "connect",
+      "tables": [
+        "accounts",
+        "invoices",
+        "people",
+        "products"
+      ],
+      "success": true
+    }
+  },
+  {
+    "json": {
+      "connectionUrl": "clickzetta://qiliang:Ql123456!@jnsxwfyr.uat-api.clickzetta.com/quick_start?virtualcluster=default_ap&schema=from_pg",
+      "databaseType": "clickzetta",
+      "operation": "connect",
+      "tables": [
+        "accounts",
+        "invoices",
+        "test_table"
+      ],
+      "success": true
+    }
+  }
+]

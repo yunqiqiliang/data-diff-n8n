@@ -347,18 +347,22 @@ export class DataComparison implements INodeType {
 			console.log('请求URL:', apiUrl);
 			console.log('请求体:', JSON.stringify(requestData, null, 2));
 
-			// 发送请求
+			// 发送请求 - 使用重试机制
 			try {
-				const response = await context.helpers.httpRequest({
-					method: 'POST',
-					url: apiUrl,
-					headers: {
-						'Content-Type': 'application/json',
+				const response = await DataComparison.httpRequestWithRetry(
+					context,
+					{
+						method: 'POST',
+						url: apiUrl,
+						headers: {
+							'Content-Type': 'application/json',
+						},
+						body: requestData,
+						json: true,
+						returnFullResponse: true,
 					},
-					body: requestData,
-					json: true,
-					returnFullResponse: true,
-				});
+					'TableComparison'
+				);
 
 				console.log('API请求成功，响应:', JSON.stringify(response.body));
 
@@ -436,16 +440,20 @@ export class DataComparison implements INodeType {
 			console.log('请求体:', JSON.stringify(requestData, null, 2));
 
 			try {
-				const response = await context.helpers.httpRequest({
-					method: 'POST',
-					url: apiUrl,
-					headers: {
-						'Content-Type': 'application/json',
+				const response = await DataComparison.httpRequestWithRetry(
+					context,
+					{
+						method: 'POST',
+						url: apiUrl,
+						headers: {
+							'Content-Type': 'application/json',
+						},
+						body: requestData,
+						json: true,
+						returnFullResponse: true,
 					},
-					body: requestData,
-					json: true,
-					returnFullResponse: true,
-				});
+					'SchemaComparison'
+				);
 
 				console.log('模式比对API响应:', JSON.stringify(response.body));
 
@@ -530,15 +538,19 @@ export class DataComparison implements INodeType {
 		const resultUrl = `http://data-diff-api:8000/api/v1/compare/results/${comparisonId}`;
 
 		try {
-			const response = await context.helpers.httpRequest({
-				method: 'GET',
-				url: resultUrl,
-				headers: {
-					'Content-Type': 'application/json',
+			const response = await DataComparison.httpRequestWithRetry(
+				context,
+				{
+					method: 'GET',
+					url: resultUrl,
+					headers: {
+						'Content-Type': 'application/json',
+					},
+					json: true,
+					returnFullResponse: true,
 				},
-				json: true,
-				returnFullResponse: true,
-			});
+				'GetComparisonResult'
+			);
 
 			if (response.statusCode === 404) {
 				throw new Error(`Comparison result not found for ID: ${comparisonId}. The comparison may still be running or the ID is invalid.`);
@@ -817,5 +829,168 @@ export class DataComparison implements INodeType {
 		});
 
 		return detailed;
+	}
+
+	/**
+	 * 带重试机制的 API 调用包装器
+	 * 专门处理数据库连接错误和网络问题
+	 */
+	private static async executeWithRetry<T>(
+		operation: () => Promise<T>,
+		context: {
+			operationName: string;
+			maxRetries?: number;
+			baseDelay?: number;
+			maxDelay?: number;
+			retryCondition?: (error: any) => boolean;
+		}
+	): Promise<T> {
+		const {
+			operationName,
+			maxRetries = 3,
+			baseDelay = 1000,
+			maxDelay = 10000,
+			retryCondition = DataComparison.isRetryableError
+		} = context;
+
+		let lastError: any;
+		let attempt = 0;
+
+		while (attempt <= maxRetries) {
+			try {
+				console.log(`[${operationName}] 尝试 ${attempt + 1}/${maxRetries + 1}`);
+				const result = await operation();
+
+				if (attempt > 0) {
+					console.log(`[${operationName}] 重试成功，总共尝试了 ${attempt + 1} 次`);
+				}
+
+				return result;
+			} catch (error: any) {
+				lastError = error;
+				console.error(`[${operationName}] 尝试 ${attempt + 1} 失败:`, error.message);
+
+				// 如果是最后一次尝试，或者错误不可重试，直接抛出
+				if (attempt >= maxRetries || !retryCondition(error)) {
+					console.error(`[${operationName}] 不再重试，原因: ${attempt >= maxRetries ? '达到最大重试次数' : '错误不可重试'}`);
+					throw error;
+				}
+
+				// 计算延迟时间 (指数退避 + 随机抖动)
+				const delay = Math.min(
+					baseDelay * Math.pow(2, attempt) + Math.random() * 1000,
+					maxDelay
+				);
+
+				console.log(`[${operationName}] ${delay}ms 后重试...`);
+				await DataComparison.sleep(delay);
+				attempt++;
+			}
+		}
+
+		throw lastError;
+	}
+
+	/**
+	 * 判断错误是否可以重试
+	 */
+	private static isRetryableError(error: any): boolean {
+		const errorMessage = error.message?.toLowerCase() || '';
+
+		// 可重试的错误类型
+		const retryablePatterns = [
+			'connection already closed',
+			'connection reset',
+			'connection refused',
+			'connection timeout',
+			'connection lost',
+			'timeout',
+			'network error',
+			'econnrefused',
+			'etimedout',
+			'socket hang up',
+			'socket timeout',
+			'read timeout',
+			'write timeout',
+			'connection pool exhausted',
+			'max connections reached',
+			'server temporarily unavailable'
+		];
+
+		// 不可重试的错误类型
+		const nonRetryablePatterns = [
+			'authentication failed',
+			'invalid credentials',
+			'permission denied',
+			'access denied',
+			'not found',
+			'table does not exist',
+			'database does not exist',
+			'invalid query',
+			'syntax error',
+			'column does not exist',
+			'invalid configuration',
+			'malformed request'
+		];
+
+		// 检查是否是不可重试的错误
+		for (const pattern of nonRetryablePatterns) {
+			if (errorMessage.includes(pattern)) {
+				return false;
+			}
+		}
+
+		// 检查是否是可重试的错误
+		for (const pattern of retryablePatterns) {
+			if (errorMessage.includes(pattern)) {
+				return true;
+			}
+		}
+
+		// HTTP 状态码检查
+		if (error.response) {
+			const statusCode = error.response.statusCode;
+			// 5xx 错误和某些 4xx 错误可以重试
+			return statusCode >= 500 || statusCode === 408 || statusCode === 429;
+		}
+
+		// 默认不重试未知错误
+		return false;
+	}
+
+	/**
+	 * 睡眠函数
+	 */
+	private static sleep(ms: number): Promise<void> {
+		return new Promise(resolve => setTimeout(resolve, ms));
+	}
+
+	/**
+	 * 增强的 HTTP 请求包装器，内置重试机制
+	 */
+	private static async httpRequestWithRetry(
+		context: IExecuteFunctions,
+		requestOptions: any,
+		operationName: string
+	): Promise<any> {
+		return DataComparison.executeWithRetry(
+			async () => {
+				console.log(`[${operationName}] 发送 HTTP 请求到:`, requestOptions.url);
+				const response = await context.helpers.httpRequest(requestOptions);
+
+				// 检查响应是否包含应用级错误
+				if (response.body && response.body.error) {
+					throw new Error(`API 返回错误: ${response.body.error}`);
+				}
+
+				return response;
+			},
+			{
+				operationName: `HTTP-${operationName}`,
+				maxRetries: 3,
+				baseDelay: 2000,
+				maxDelay: 15000
+			}
+		);
 	}
 }

@@ -1,0 +1,75 @@
+[
+  {
+    "name": "ClickZetta 连接 - 标准格式",
+    "data": {
+      "connectionUrl": "clickzetta://test_user:test_pass@instance1.uat-api.clickzetta.com/test_db?virtualcluster=default_ap&schema=public",
+      "databaseType": "clickzetta",
+      "connectionConfig": {
+        "type": "clickzetta",
+        "instance": "instance1",
+        "service": "uat-api.clickzetta.com",
+        "username": "test_user",
+        "password": "test_pass",
+        "workspace": "test_db",
+        "db_schema": "public",
+        "vcluster": "default_ap"
+      },
+      "tables": [
+        {
+          "name": "users",
+          "schema": "public"
+        },
+        {
+          "name": "orders",
+          "schema": "public"
+        }
+      ]
+    },
+    "expected_type": "clickzetta"
+  },
+  {
+    "name": "PostgreSQL 连接 - 标准格式",
+    "data": {
+      "connectionUrl": "postgresql://pg_user:pg_pass@localhost:5432/test_db",
+      "databaseType": "postgresql",
+      "connectionConfig": {
+        "type": "postgresql",
+        "host": "localhost",
+        "port": 5432,
+        "username": "pg_user",
+        "password": "pg_pass",
+        "database": "test_db",
+        "schema": "public"
+      },
+      "tables": [
+        {
+          "name": "users",
+          "schema": "public"
+        },
+        {
+          "name": "products",
+          "schema": "public"
+        }
+      ]
+    },
+    "expected_type": "postgresql"
+  },
+  {
+    "name": "ClickZetta 连接 - 仅 connectionConfig",
+    "data": {
+      "connectionConfig": {
+        "type": "clickzetta",
+        "instance": "instance2",
+        "service": "uat-api.clickzetta.com"
+      }
+    },
+    "expected_type": "clickzetta"
+  },
+  {
+    "name": "PostgreSQL 连接 - 仅连接字符串",
+    "data": {
+      "connectionUrl": "postgresql://user:pass@host:5432/db"
+    },
+    "expected_type": "postgresql"
+  }
+]

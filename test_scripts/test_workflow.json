@@ -1,0 +1,49 @@
+{
+  "name": "DataComparison 节点测试",
+  "nodes": [
+    {
+      "parameters": {
+        "jsCode": "\n// 模拟 ClickZetta 连接器输出\nconst clickzettaData = {\n  connectionUrl: \"clickzetta://test_user:test_pass@instance1.uat-api.clickzetta.com/test_db?virtualcluster=default_ap&schema=public\",\n  databaseType: \"clickzetta\",\n  connectionConfig: {\n    type: \"clickzetta\",\n    instance: \"instance1\",\n    service: \"uat-api.clickzetta.com\",\n    username: \"test_user\",\n    password: \"test_pass\",\n    workspace: \"test_db\",\n    db_schema: \"public\",\n    vcluster: \"default_ap\"\n  },\n  tables: [\n    {name: \"users\", schema: \"public\"},\n    {name: \"orders\", schema: \"public\"}\n  ]\n};\n\n// 模拟 PostgreSQL 连接器输出\nconst postgresData = {\n  connectionUrl: \"postgresql://pg_user:pg_pass@localhost:5432/test_db\",\n  databaseType: \"postgresql\",\n  connectionConfig: {\n    type: \"postgresql\",\n    host: \"localhost\",\n    port: 5432,\n    username: \"pg_user\",\n    password: \"pg_pass\",\n    database: \"test_db\",\n    schema: \"public\"\n  },\n  tables: [\n    {name: \"users\", schema: \"public\"},\n    {name: \"products\", schema: \"public\"}\n  ]\n};\n\n// 测试不同格式的数据\nconst testCases = [\n  {\n    name: \"ClickZetta 标准格式\",\n    ...clickzettaData\n  },\n  {\n    name: \"PostgreSQL 标准格式\", \n    ...postgresData\n  },\n  {\n    name: \"ClickZetta 仅 connectionConfig\",\n    connectionConfig: {\n      type: \"clickzetta\",\n      instance: \"instance2\",\n      service: \"uat-api.clickzetta.com\"\n    }\n  },\n  {\n    name: \"PostgreSQL 仅连接字符串\",\n    connectionUrl: \"postgresql://user:pass@host:5432/db\"\n  }\n];\n\nreturn testCases.map(testCase => ({json: testCase}));\n"
+      },
+      "id": "test-data-node",
+      "name": "测试数据生成",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "compareTables",
+        "sourceConnection": "={{$json.connectionUrl}}",
+        "targetConnection": "={{$json.connectionUrl}}",
+        "sourceTable": "users",
+        "targetTable": "users",
+        "autoFillFromUpstream": true
+      },
+      "id": "data-comparison-node",
+      "name": "数据比较测试",
+      "type": "dataComparison",
+      "typeVersion": 1,
+      "position": [
+        400,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "测试数据生成": {
+      "main": [
+        [
+          {
+            "node": "数据比较测试",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

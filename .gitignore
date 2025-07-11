@@ -156,3 +156,6 @@ docker-compose-local.yml
 /cleanup_archive
 /debug_scripts
 /legacy_files
+/docs_archive
+/scripts
+/reports

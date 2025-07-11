@@ -1,6 +1,56 @@
-# data-diff-n8n: Compare datasets fast, within or across SQL databases
+# 🚀 一键启动脚本：start.sh
 
-一个基于 data-diff 的 N8N 集成解决方案，提供跨数据库的数据比较和工作流自动化功能。
+本项目推荐使用 `start.sh` 脚本进行开发环境的启动和管理。它集成了常用的构建、重启、依赖检查、SSL 证书生成等自动化流程，极大简化了本地开发和测试。
+
+### 常用用法
+
+```bash
+# 快速启动（推荐日常开发）
+./start.sh
+
+# 重新构建（代码有变动时）
+./start.sh --rebuild
+
+# 强制重建所有镜像（依赖或环境大变动时）
+./start.sh --force-rebuild
+
+# 查看详细帮助
+./start.sh --help
+```
+
+### 主要功能
+
+- 自动检测并构建 N8N TypeScript 节点
+- 自动安装 npm 依赖
+- 自动生成 SSL 证书（非快速模式）
+- 智能判断是否需要重新构建
+- 支持 Docker 镜像的快速启动、重建、强制重建
+- 启动后自动输出所有服务访问地址和默认账号
+
+### 启动参数说明
+
+- `--quick` / `-q`：快速启动（默认）
+- `--rebuild` / `-r`：重新构建后启动
+- `--force-rebuild` / `-f`：强制重建所有镜像
+- `--skip-prune`：跳过系统清理
+- `--verbose` / `-v`：详细输出
+- `--help` / `-h`：显示帮助信息
+
+### 启动后访问
+
+  - Data-Diff API: http://localhost:8000
+  - N8N 工作流: http://localhost:5678
+  - Grafana 监控: http://localhost:3000
+  - Prometheus: http://localhost:9091
+  - Jupyter Lab: http://localhost:8889
+  - Mailhog: http://localhost:8025
+  - Nginx (HTTP): http://localhost:80
+  - Nginx (HTTPS): https://localhost:443
+
+---
+
+
+## 🔗 项目结构供跨数据库的数据比较和工作流自动化功能。
 
 ## 🚀 快速开始
 
@@ -9,46 +59,37 @@
 - Node.js 18+ (用于构建 N8N 节点)
 - Python 3.11+ (可选，用于本地开发)
 
-### 重新构建 N8N 节点包
-```bash
-cd n8n && npm run build
-```
 ### 一键启动
 ```bash
 # 克隆项目
 git clone https://github.com/yunqiqiliang/data-diff-n8n.git
 cd data-diff-n8n
 
-# 一键启动（自动处理所有构建和配置）
-./start.sh --force-rebuild
+# 构建 N8N 节点
+cd n8n && rm -rf dist && npm run build && cd ..
+
+
+# 启动所有服务
+docker-compose -f docker-compose.dev.yml up -d
 ```
 
-> 🎉 **全自动化**: 脚本会自动构建 N8N 节点、生成 SSL 证书、安装依赖等！
-
-### 启动选项
-```bash
-./start.sh                  # 快速启动（推荐日常使用）
-./start.sh --rebuild        # 代码修改后重新构建
-./start.sh --force-rebuild  # 完全重新构建
-./start.sh --help           # 查看帮助
-```
 
 ## 🌟 功能特性
 
-- **多数据库支持**: 支持 14 种数据库类型（PostgreSQL, MySQL, Clickzetta, ClickHouse, Snowflake 等）
-- **N8N 集成**: 提供自定义节点，轻松创建数据比较工作流
-- **实时监控**: 集成 Grafana 和 Prometheus 监控
-- **RESTful API**: 提供完整的 API 接口
-- **可视化分析**: 内置 Jupyter Lab 用于数据分析
+### 核心功能
+- **多数据库支持**: 支持 PostgreSQL, ClickZetta, MySQL, SQLite, Oracle, MS SQL
+- **数据比较**: 表数据比较、模式比较、实时差异检测
+- **工作流自动化**: 基于 N8N 的可视化工作流
+- **参数自动填充**: 智能从上游节点获取连接信息和表列表
+- **表达式引用**: 支持 N8N 表达式语法引用上游数据
 
-## 🔗 服务访问
+### 技术特性
+- **异步处理**: 后台任务处理大数据量比较
+- **错误处理**: 完善的错误信息和调试支持
+- **RESTful API**: 完整的 API 接口
+- **健康监控**: 集成 Grafana 和 Prometheus
+- **容器化部署**: 完整的 Docker 部署方案
 
-启动成功后，您可以访问：
-
-- **N8N 工作流**: http://localhost:5678 (admin/admin123)
-- **Data-Diff API**: http://localhost:8000
-- **Grafana 监控**: http://localhost:3000 (admin/admin123)
-- **Jupyter Lab**: http://localhost:8889 (token=datadiff123)
 
 ## � 项目结构
 
@@ -84,7 +125,7 @@ data-diff-n8n/
 
 As of May 17, 2024, Datafold is no longer actively supporting or developing open source data-diff. We're grateful to everyone who made contributions along the way. Please see [our blog post](https://www.datafold.com/blog/sunsetting-open-source-data-diff) for additional context on this decision.
 
----️ As of May 17, 2024, Datafold is no longer actively supporting or developing open source data-diff. We’re grateful to everyone who made contributions along the way. Please see [our blog post](https://www.datafold.com/blog/sunsetting-open-source-data-diff) for additional context on this decision.
+---️ As of May 17, 2024, Datafold is no longer actively supporting or developing open source data-diff. We’re grateful to everyone who made contributions along the way. Please see [our blog post](https://www.datafold.com/blog/sunsetting-open-source_data-diff) for additional context on this decision.
 
 ---
 

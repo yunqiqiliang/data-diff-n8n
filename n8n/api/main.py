@@ -1652,3 +1652,28 @@ async def compare_schemas_nested_endpoint(request: NestedSchemaComparisonRequest
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"嵌套结构模式比对失败: {str(e)}"
         )
+
+
+@app.get("/api/v1/database_types")
+async def get_database_types():
+    """获取支持的数据库类型"""
+    try:
+        supported_types = [
+            "postgresql",
+            "clickzetta",
+            "mysql",
+            "sqlite",
+            "oracle",
+            "mssql"
+        ]
+
+        return JSONResponse(
+            status_code=status.HTTP_200_OK,
+            content=supported_types
+        )
+    except Exception as e:
+        logger.error(f"Failed to get database types: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get database types: {str(e)}"
+        )
