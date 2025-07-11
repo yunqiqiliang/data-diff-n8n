@@ -11,7 +11,7 @@ export class DataComparison implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Data Comparison',
 		name: 'dataComparison',
-		icon: 'file:dataComparison.svg',
+		icon: 'fa:exchange-alt',
 		group: ['transform'],
 		version: 1,
 		description: 'Compare data between different databases using data-diff',
@@ -34,16 +34,22 @@ export class DataComparison implements INodeType {
 				noDataExpression: true,
 				options: [
 					{
-						name: 'Compare Tables',
+						name: 'Compare Table',
 						value: 'compareTables',
 						description: 'Compare two database tables',
 						action: 'Compare two database tables',
 					},
 					{
-						name: 'Compare Schemas',
+						name: 'Compare Schema',
 						value: 'compareSchemas',
 						description: 'Compare database schemas',
 						action: 'Compare database schemas',
+					},
+					{
+						name: 'Get Comparison Result',
+						value: 'getComparisonResult',
+						description: 'Get the result of a previously started comparison',
+						action: 'Get comparison result by ID',
 					},
 				],
 				default: 'compareTables',
@@ -55,6 +61,11 @@ export class DataComparison implements INodeType {
 				default: '',
 				placeholder: 'postgresql://user:pass@host:port/db or from upstream node',
 				description: 'Source database connection string (can be filled from upstream DatabaseConnector/ClickzettaConnector node)',
+				displayOptions: {
+					show: {
+						operation: ['compareTables', 'compareSchemas'],
+					},
+				},
 				required: true,
 			},
 			{
@@ -64,6 +75,11 @@ export class DataComparison implements INodeType {
 				default: '',
 				placeholder: 'clickzetta://user:pass@host:port/db or from upstream node',
 				description: 'Target database connection string (can be filled from upstream DatabaseConnector/ClickzettaConnector node)',
+				displayOptions: {
+					show: {
+						operation: ['compareTables', 'compareSchemas'],
+					},
+				},
 				required: true,
 			},
 			{
@@ -98,9 +114,9 @@ export class DataComparison implements INodeType {
 				displayName: 'Key Columns',
 				name: 'keyColumns',
 				type: 'string',
-				default: 'id',
-				placeholder: 'id,user_id',
-				description: 'Primary key columns (comma-separated)',
+				default: '',
+				placeholder: 'id,user_id (leave empty to use credential default)',
+				description: 'Primary key columns (comma-separated). Leave empty to use the default from credentials.',
 				displayOptions: {
 					show: {
 						operation: ['compareTables'],
@@ -113,7 +129,7 @@ export class DataComparison implements INodeType {
 				type: 'string',
 				default: '',
 				placeholder: 'name,email,status (leave empty for all columns)',
-				description: 'Specific columns to compare (comma-separated, leave empty to compare all columns)',
+				description: 'Specific columns to compare (comma-separated, leave empty to compare all columns except excluded ones)',
 				displayOptions: {
 					show: {
 						operation: ['compareTables'],
@@ -126,55 +142,7 @@ export class DataComparison implements INodeType {
 				type: 'string',
 				default: '',
 				placeholder: 'status = \'active\' AND created_date > \'2023-01-01\'',
-				description: 'SQL WHERE condition to filter rows (optional)',
-				displayOptions: {
-					show: {
-						operation: ['compareTables'],
-					},
-				},
-			},
-			{
-				displayName: 'Sample Size',
-				name: 'sampleSize',
-				type: 'number',
-				default: 10000,
-				description: 'Number of rows to sample for comparison',
-				displayOptions: {
-					show: {
-						operation: ['compareTables'],
-					},
-				},
-			},
-			{
-				displayName: 'Number of Threads',
-				name: 'threads',
-				type: 'number',
-				default: 4,
-				description: 'Number of parallel threads for comparison',
-				displayOptions: {
-					show: {
-						operation: ['compareTables'],
-					},
-				},
-			},
-			{
-				displayName: 'Case Sensitive',
-				name: 'caseSensitive',
-				type: 'boolean',
-				default: true,
-				description: 'Whether string comparisons should be case sensitive',
-				displayOptions: {
-					show: {
-						operation: ['compareTables'],
-					},
-				},
-			},
-			{
-				displayName: 'Bisection Threshold',
-				name: 'bisectionThreshold',
-				type: 'number',
-				default: 1024,
-				description: 'Threshold for bisection algorithm optimization',
+				description: 'SQL WHERE condition to filter rows (optional, specific to this comparison)',
 				displayOptions: {
 					show: {
 						operation: ['compareTables'],
@@ -187,6 +155,20 @@ export class DataComparison implements INodeType {
 				type: 'boolean',
 				default: true,
 				description: 'Automatically fill connection URLs and table lists from upstream DatabaseConnector/ClickzettaConnector nodes',
+			},
+			{
+				displayName: 'Comparison ID',
+				name: 'comparisonId',
+				type: 'string',
+				default: '',
+				placeholder: 'e.g., 02f29186-e0c9-464c-8e7e-7ec66ac7c24d',
+				description: 'The ID of the comparison task to get results for',
+				displayOptions: {
+					show: {
+						operation: ['getComparisonResult'],
+					},
+				},
+				required: true,
 			},
 		],
 	};
@@ -210,6 +192,9 @@ export class DataComparison implements INodeType {
 						break;
 					case 'compareSchemas':
 						result = await DataComparison.compareSchemas(this, i, upstreamData);
+						break;
+					case 'getComparisonResult':
+						result = await DataComparison.getComparisonResult(this, i);
 						break;
 					default:
 						throw new Error(`Unknown operation: ${operation}`);
@@ -247,10 +232,6 @@ export class DataComparison implements INodeType {
 		const keyColumns = context.getNodeParameter('keyColumns', itemIndex) as string;
 		const columnsToCompare = context.getNodeParameter('columnsToCompare', itemIndex) as string;
 		const whereCondition = context.getNodeParameter('whereCondition', itemIndex) as string;
-		const sampleSize = context.getNodeParameter('sampleSize', itemIndex) as number;
-		const threads = context.getNodeParameter('threads', itemIndex) as number;
-		const caseSensitive = context.getNodeParameter('caseSensitive', itemIndex) as boolean;
-		const bisectionThreshold = context.getNodeParameter('bisectionThreshold', itemIndex) as number;
 
 		// 如果连接字符串为空，尝试从上游数据获取
 		if (!sourceConnection && upstreamData.connections.length > 0) {
@@ -275,6 +256,37 @@ export class DataComparison implements INodeType {
 		// 获取凭证
 		const credentials = await context.getCredentials('dataDiffConfig');
 
+		// 参数优先级：节点表单参数 > 凭据配置 > 默认值
+		// 只有特定的参数可以在节点表单中覆盖，其他参数直接从凭据获取
+		const mergedKeyColumns = keyColumns || (typeof credentials?.keyColumns === 'string' ? credentials.keyColumns : '') || 'id';
+
+		// 所有系统性参数直接从凭据获取，有默认值保底
+		const mergedSampleSize = (typeof credentials?.sampleSize === 'number' ? credentials.sampleSize : 0) || 10000;
+		const mergedThreads = (typeof credentials?.threads === 'number' ? credentials.threads : 0) || 4;
+		const mergedCaseSensitive = credentials?.caseSensitive !== undefined ? credentials.caseSensitive : true;
+		const mergedTolerance = (typeof credentials?.tolerance === 'number' ? credentials.tolerance : 0) || 0.001;
+		const mergedMethod = (typeof credentials?.method === 'string' ? credentials.method : '') || 'hashdiff';
+		const mergedExcludeColumns = (typeof credentials?.excludeColumns === 'string' ? credentials.excludeColumns : '') || '';
+		const mergedBisectionThreshold = (typeof credentials?.bisectionThreshold === 'number' ? credentials.bisectionThreshold : 0) || 1024;
+		const mergedStrictTypeChecking = credentials?.strictTypeChecking !== undefined ? credentials.strictTypeChecking : false;
+
+		console.log('参数合并结果:', {
+			keyColumns: mergedKeyColumns,
+			sampleSize: mergedSampleSize,
+			threads: mergedThreads,
+			caseSensitive: mergedCaseSensitive,
+			tolerance: mergedTolerance,
+			method: mergedMethod,
+			excludeColumns: mergedExcludeColumns,
+			bisectionThreshold: mergedBisectionThreshold,
+			strictTypeChecking: mergedStrictTypeChecking,
+			source: {
+				formKeyColumns: keyColumns,
+				credentialsKeyColumns: credentials?.keyColumns,
+				credentialsSampleSize: credentials?.sampleSize
+			}
+		});
+
 		if (!sourceConnection) {
 			throw new Error('Source connection string is required');
 		}
@@ -290,27 +302,45 @@ export class DataComparison implements INodeType {
 
 		// 调用API
 		try {
-			const apiUrl = 'http://localhost:8000/api/v1/compare/tables';
+			const apiUrl = 'http://data-diff-api:8000/api/v1/compare/tables/nested';
 
-			// 解析列名
-			const keyColumnsList = keyColumns.split(',').map(col => col.trim()).filter(col => col);
-			const columnsToCompareList = columnsToCompare ?
+			// 解析列名 - 使用合并后的参数，确保类型安全
+			const keyColumnsList = typeof mergedKeyColumns === 'string' && mergedKeyColumns ?
+				mergedKeyColumns.split(',').map(col => col.trim()).filter(col => col) :
+				['id'];
+
+			const columnsToCompareList = typeof columnsToCompare === 'string' && columnsToCompare ?
 				columnsToCompare.split(',').map(col => col.trim()).filter(col => col) :
 				[];
 
-			// 使用简化的 JSON 请求方式，与API测试保持一致
+			// 处理排除列（来自凭据），确保类型安全
+			const excludeColumnsList = typeof mergedExcludeColumns === 'string' && mergedExcludeColumns ?
+				mergedExcludeColumns.split(',').map(col => col.trim()).filter(col => col) :
+				[];
+
+			// 解析连接字符串为配置对象
+			const sourceConfig = DataComparison.parseConnectionString(sourceConnection);
+			const targetConfig = DataComparison.parseConnectionString(targetConnection);
+
+			// 使用嵌套的 JSON 请求方式，与 nested 端点保持一致
 			const requestData = {
-				source_connection: sourceConnection,
-				target_connection: targetConnection,
-				source_table: sourceTable,
-				target_table: targetTable,
-				key_columns: keyColumnsList,  // 使用正确的参数名
-				columns_to_compare: columnsToCompareList.length > 0 ? columnsToCompareList : undefined,
-				sample_size: sampleSize,
-				threads: threads,
-				case_sensitive: caseSensitive,
-				bisection_threshold: bisectionThreshold,
-				where_condition: whereCondition || undefined
+				source_config: sourceConfig,
+				target_config: targetConfig,
+				comparison_config: {
+					source_table: sourceTable,
+					target_table: targetTable,
+					key_columns: keyColumnsList,
+					columns_to_compare: columnsToCompareList.length > 0 ? columnsToCompareList : undefined,
+					exclude_columns: excludeColumnsList.length > 0 ? excludeColumnsList : undefined,
+					sample_size: mergedSampleSize,
+					threads: mergedThreads,
+					case_sensitive: mergedCaseSensitive,
+					tolerance: mergedTolerance,
+					algorithm: mergedMethod,
+					bisection_threshold: mergedBisectionThreshold,
+					where_condition: whereCondition || undefined,
+					strict_type_checking: mergedStrictTypeChecking
+				}
 			};
 
 			console.log('发送API请求 (纯JSON方式)');
@@ -332,72 +362,26 @@ export class DataComparison implements INodeType {
 
 				console.log('API请求成功，响应:', JSON.stringify(response.body));
 
-				// API 返回的是 comparison_id，需要查询结果
+				// 检查 API 是否返回错误
+				if (response.body.error) {
+					throw new Error(`API返回错误: ${response.body.error}`);
+				}
+
+				// API 返回的是 comparison_id，直接返回而不等待结果
 				const comparisonId = response.body.comparison_id;
 				if (!comparisonId) {
 					throw new Error('API 未返回比对ID');
 				}
 
-				// 等待比对完成并获取结果
-				let comparisonResult;
-				let attempts = 0;
-				const maxAttempts = 30; // 最多等待30次，每次2秒
-
-				while (attempts < maxAttempts) {
-					await new Promise(resolve => setTimeout(resolve, 2000)); // 等待2秒
-					attempts++;
-
-					try {
-						const resultResponse = await context.helpers.httpRequest({
-							method: 'GET',
-							url: `http://localhost:8000/api/v1/compare/results/${comparisonId}`,
-							json: true,
-							returnFullResponse: true,
-						});
-
-						if (resultResponse.body.status === 'completed' && resultResponse.body.result) {
-							comparisonResult = resultResponse.body.result;
-							break;
-						} else if (resultResponse.body.status === 'error') {
-							throw new Error(`比对失败: ${resultResponse.body.message || '未知错误'}`);
-						}
-						// 如果状态是 running 或其他，继续等待
-					} catch (error: any) {
-						console.error(`查询比对结果失败 (尝试 ${attempts}):`, error.message);
-						if (attempts >= maxAttempts) {
-							throw new Error(`比对超时：经过 ${maxAttempts} 次尝试仍未完成`);
-						}
-					}
-				}
-
-				if (!comparisonResult) {
-					throw new Error('比对超时：未能在预期时间内完成');
-				}
-
-				// 返回成功结果
 				return {
-					sourceConnection,
-					targetConnection,
-					sourceTable,
-					targetTable,
-					keyColumns: keyColumnsList,
-					columnsToCompare: columnsToCompareList,
-					whereCondition: whereCondition || null,
-					sampleSize,
-					threads,
-					caseSensitive,
-					bisectionThreshold,
-					result: comparisonResult.status || 'completed',
-					summary: comparisonResult.summary || {},
-					statistics: comparisonResult.statistics || {},
-					config: comparisonResult.config || {},
-					sample_differences: comparisonResult.sample_differences || [],
-					availableConnections: upstreamData.connections,
-					availableTables: upstreamData.tables,
-					executionTime: comparisonResult.execution_time_seconds ? `${comparisonResult.execution_time_seconds}s` : '0s',
-					jobId: comparisonResult.job_id || comparisonId,
 					comparisonId: comparisonId,
-					rawResponse: comparisonResult // 保留原始响应，用于调试
+					status: response.body.status || 'started',
+					message: response.body.message || '表比对任务已启动',
+					requestData: requestData,
+					apiUrl: apiUrl,
+					timestamp: new Date().toISOString(),
+					retrieveResultUrl: `http://data-diff-api:8000/api/v1/compare/results/${comparisonId}`,
+					note: 'Use the "Get Comparison Result" operation with this comparison ID to retrieve the results'
 				};
 			} catch (error: any) {
 				console.error('API请求失败:', error.message);
@@ -405,36 +389,10 @@ export class DataComparison implements INodeType {
 					console.error('错误响应状态:', error.response.statusCode);
 					console.error('错误响应内容:', JSON.stringify(error.response.body));
 				}
-
-				// 返回错误结果
-				return {
-					sourceConnection,
-					targetConnection,
-					sourceTable,
-					targetTable,
-					keyColumns: keyColumnsList,
-					columnsToCompare: columnsToCompareList,
-					whereCondition: whereCondition || null,
-					sampleSize,
-					threads,
-					caseSensitive,
-					bisectionThreshold,
-					result: 'error',
-					summary: {
-						status: '请求失败',
-						error: error.message,
-						statusCode: error.response?.statusCode,
-						statusMessage: error.response?.statusMessage
-					},
-					details: error.response?.body || {},
-					availableConnections: upstreamData.connections,
-					availableTables: upstreamData.tables,
-					executionTime: '0s',
-					jobId: 'error-job-id',
-				};
+				throw new Error(`启动表比对失败: ${error.message}`);
 			}
 		} catch (error: any) {
-			throw new Error(`Data comparison API request failed: ${error}`);
+			throw new Error(`Data comparison API request failed: ${error.message}`);
 		}
 	}
 
@@ -459,78 +417,149 @@ export class DataComparison implements INodeType {
 			throw new Error('Target connection string is required');
 		}
 
-		// 调用API
+		// 调用API - 使用嵌套端点
 		try {
-			const apiUrl = 'http://localhost:8000/api/v1/compare/schemas';
+			const apiUrl = 'http://data-diff-api:8000/api/v1/compare/schemas/nested';
 
-			// 查询参数
-			const queryParams = {
-				source_connection: sourceConnection,
-				target_connection: targetConnection,
-				operation_type: 'compareSchemas',
-				kwargs: '{}'  // 添加关键的 kwargs 参数
+			// 解析连接字符串为配置对象
+			const sourceConfig = DataComparison.parseConnectionString(sourceConnection);
+			const targetConfig = DataComparison.parseConnectionString(targetConnection);
+
+			// 使用嵌套的 JSON 请求方式
+			const requestData = {
+				source_config: sourceConfig,
+				target_config: targetConfig
 			};
 
-			// 构建完整的URL，包含查询参数
-			const queryUrl = new URL(apiUrl);
-			Object.entries(queryParams).forEach(([key, value]) => {
-				queryUrl.searchParams.append(key, String(value));
-			});
-
-			console.log('发送模式比较API请求 (查询参数+请求体方式)');
-			console.log('请求URL:', queryUrl.toString());
+			console.log('发送模式比对API请求 (嵌套JSON方式)');
+			console.log('请求URL:', apiUrl);
+			console.log('请求体:', JSON.stringify(requestData, null, 2));
 
 			try {
 				const response = await context.helpers.httpRequest({
 					method: 'POST',
-					url: queryUrl.toString(),
+					url: apiUrl,
 					headers: {
 						'Content-Type': 'application/json',
 					},
-					body: {},  // 空请求体，所有参数在URL中
+					body: requestData,
 					json: true,
 					returnFullResponse: true,
 				});
 
-				console.log('模式比较API响应:', JSON.stringify(response.body));
+				console.log('模式比对API响应:', JSON.stringify(response.body));
 
-				// 返回API响应和其他上下文信息
+				// 检查 API 是否返回错误
+				if (response.body.error) {
+					throw new Error(`API返回错误: ${response.body.error}`);
+				}
+
+				// 格式化返回结果
+				const result = response.body.result;
+				const summary = result.summary || {};
+				const diff = result.diff || {};
+
+				// 生成详细的差异明细
+				const detailedDifferences = DataComparison.generateDetailedDifferences(diff);
+				const executionSummary = DataComparison.generateSchemaSummary(summary, diff);
+
 				return {
-					sourceConnection,
-					targetConnection,
-					result: response.body.result || 'completed',
-					differences: response.body.differences || [],
-					availableConnections: upstreamData.connections,
-					executionTime: response.body.execution_time || '0s',
-					jobId: response.body.comparison_id || response.body.job_id || 'schema-job',
-					rawResponse: response.body // 保留原始响应，用于调试
+					status: response.body.status || 'completed',
+					sourceType: response.body.source_type,
+					targetType: response.body.target_type,
+					summary: {
+						identical: summary.schemas_identical || false,
+						totalDifferences: summary.total_differences || 0,
+						tableDifferences: summary.table_differences || 0,
+						columnDifferences: summary.column_differences || 0,
+						typeDifferences: summary.type_differences || 0
+					},
+					differences: {
+						tablesOnlyInSource: diff.tables_only_in_source || [],
+						tablesOnlyInTarget: diff.tables_only_in_target || [],
+						commonTables: diff.common_tables || [],
+						columnDifferences: diff.column_diffs || {},
+						typeDifferences: diff.type_diffs || {}
+					},
+					// 添加详细的差异明细
+					detailedDifferences: detailedDifferences,
+					sourceSchema: {
+						databaseType: result.source_schema?.database_type,
+						schemaName: result.source_schema?.schema_name,
+						totalTables: result.source_schema?.tables?.length || 0,
+						tables: result.source_schema?.tables || []
+					},
+					targetSchema: {
+						databaseType: result.target_schema?.database_type,
+						schemaName: result.target_schema?.schema_name,
+						totalTables: result.target_schema?.tables?.length || 0,
+						tables: result.target_schema?.tables || []
+					},
+					// 执行摘要（友好的文本描述）
+					executionSummary: executionSummary,
+					requestData: requestData,
+					apiUrl: apiUrl,
+					timestamp: result.timestamp || new Date().toISOString(),
+					// 正确使用executionTime字段
+					executionTime: '模式比对已完成',
+					// 添加处理时间信息
+					processedAt: new Date().toISOString(),
+					duration: 'instant' // 模式比对通常很快
 				};
 			} catch (error: any) {
-				console.error('模式比较API请求失败:', error.message);
+				console.error('模式比对API请求失败:', error.message);
 				if (error.response) {
 					console.error('错误响应状态:', error.response.statusCode);
 					console.error('错误响应内容:', JSON.stringify(error.response.body));
 				}
-
-				// 返回错误结果
-				return {
-					sourceConnection,
-					targetConnection,
-					result: 'error',
-					summary: {
-						status: '请求失败',
-						error: error.message,
-						statusCode: error.response?.statusCode,
-						statusMessage: error.response?.statusMessage
-					},
-					differences: [],
-					availableConnections: upstreamData.connections,
-					executionTime: '0s',
-					jobId: 'error-schema-job',
-				};
+				throw new Error(`模式比对失败: ${error.message}`);
 			}
 		} catch (error: any) {
-			throw new Error(`Schema comparison API request failed: ${error}`);
+			throw new Error(`Schema comparison API request failed: ${error.message}`);
+		}
+	}
+
+	private static async getComparisonResult(context: IExecuteFunctions, itemIndex: number): Promise<any> {
+		const comparisonId = context.getNodeParameter('comparisonId', itemIndex) as string;
+
+		if (!comparisonId) {
+			throw new Error('Comparison ID is required');
+		}
+
+		// 调用 API 获取比对结果
+		const resultUrl = `http://data-diff-api:8000/api/v1/compare/results/${comparisonId}`;
+
+		try {
+			const response = await context.helpers.httpRequest({
+				method: 'GET',
+				url: resultUrl,
+				headers: {
+					'Content-Type': 'application/json',
+				},
+				json: true,
+				returnFullResponse: true,
+			});
+
+			if (response.statusCode === 404) {
+				throw new Error(`Comparison result not found for ID: ${comparisonId}. The comparison may still be running or the ID is invalid.`);
+			}
+
+			if (response.statusCode !== 200) {
+				throw new Error(`Failed to get comparison result: ${response.statusCode} ${response.statusMessage}`);
+			}
+
+			return {
+				comparisonId,
+				resultUrl,
+				status: 'completed',
+				data: response.body,
+				retrievedAt: new Date().toISOString(),
+			};
+		} catch (error: any) {
+			if (error.message.includes('ECONNREFUSED') || error.message.includes('connect')) {
+				throw new Error(`Failed to connect to data-diff API at http://data-diff-api:8000. Please check if the API is running and accessible.`);
+			}
+			throw error;
 		}
 	}
 
@@ -564,5 +593,229 @@ export class DataComparison implements INodeType {
 		}
 
 		return upstreamData;
+	}
+
+	private static parseConnectionString(connectionString: string): any {
+		/**
+		 * 解析数据库连接字符串为配置对象
+		 * 支持 PostgreSQL 和 ClickZetta 格式
+		 */
+
+		// 如果传入的已经是对象（可能是从上游节点传递过来的）
+		if (typeof connectionString === 'object') {
+			return connectionString;
+		}
+
+		// PostgreSQL: postgresql://user:pass@host:port/database
+		if (connectionString.startsWith('postgresql://')) {
+			const url = new URL(connectionString);
+			return {
+				database_type: 'postgresql',
+				host: url.hostname,
+				port: parseInt(url.port) || 5432,
+				username: url.username,
+				password: url.password,
+				database: url.pathname.substring(1), // 移除开头的 /
+				db_schema: 'public'
+			};
+		}
+
+		// ClickZetta: clickzetta://user:pass@host/database?virtualcluster=xxx&schema=xxx
+		if (connectionString.startsWith('clickzetta://')) {
+			const url = new URL(connectionString);
+			const params = new URLSearchParams(url.search);
+
+			// 从主机名中提取 instance 和 service 信息
+			let instance = '';
+			let service = '';
+
+			if (url.hostname.includes('.')) {
+				// 格式如 instance.service.com
+				const hostParts = url.hostname.split('.');
+				instance = hostParts[0];
+				service = hostParts.slice(1).join('.');
+			} else {
+				// 如果没有点分隔，假设整个是 instance
+				instance = url.hostname;
+				service = 'uat-api.clickzetta.com'; // 默认服务地址
+			}
+
+			return {
+				database_type: 'clickzetta',
+				username: url.username,
+				password: url.password,
+				instance: instance,
+				service: service,
+				workspace: url.pathname.substring(1) || 'default', // 移除开头的 /
+				db_schema: params.get('schema') || 'public', // 修改为 db_schema 以匹配 API 期望
+				vcluster: params.get('virtualcluster') || 'default_ap' // 默认虚拟集群
+			};
+		}
+
+		// 如果是其他格式，尝试作为JSON解析
+		try {
+			const parsed = JSON.parse(connectionString);
+
+			// 确保 Clickzetta 对象有正确的字段名
+			if (parsed.database_type === 'clickzetta') {
+				// 如果使用 schema，转换为 db_schema
+				if (parsed.schema && !parsed.db_schema) {
+					parsed.db_schema = parsed.schema;
+					delete parsed.schema; // 删除原来的 schema 字段，避免混淆
+				}
+
+				// 确保必要字段有默认值
+				parsed.service = parsed.service || 'uat-api.clickzetta.com';
+				parsed.vcluster = parsed.vcluster || 'default_ap';
+				parsed.db_schema = parsed.db_schema || 'public';
+			}
+
+			return parsed;
+		} catch {
+			// 如果解析失败，返回原始字符串（向后兼容）
+			throw new Error(`Unsupported connection string format: ${connectionString}`);
+		}
+	}
+
+	private static generateSchemaSummary(summary: any, diff: any): string {
+		try {
+			const identical = summary?.schemas_identical || false;
+			const totalDiffs = summary?.total_differences || 0;
+
+			if (identical) {
+				return "✅ 模式完全相同 - 两个数据库的模式结构一致";
+			}
+
+			const parts: string[] = [];
+
+			// 总览
+			parts.push(`📊 发现 ${totalDiffs} 个差异`);
+
+			// 表级差异
+			const tablesOnlySource = diff?.tables_only_in_source || [];
+			const tablesOnlyTarget = diff?.tables_only_in_target || [];
+
+			if (tablesOnlySource.length > 0) {
+				parts.push(`📤 仅在源数据库: ${tablesOnlySource.join(', ')}`);
+			}
+
+			if (tablesOnlyTarget.length > 0) {
+				parts.push(`📥 仅在目标数据库: ${tablesOnlyTarget.join(', ')}`);
+			}
+
+			// 列级差异
+			const columnDiffs = diff?.column_diffs || {};
+			const columnDiffCount = Object.keys(columnDiffs).length;
+			if (columnDiffCount > 0) {
+				parts.push(`📋 ${columnDiffCount} 个表有列差异`);
+			}
+
+			// 类型差异
+			const typeDiffs = diff?.type_diffs || {};
+			const typeDiffCount = Object.keys(typeDiffs).length;
+			if (typeDiffCount > 0) {
+				parts.push(`🔄 ${typeDiffCount} 个表有类型差异`);
+			}
+
+			return parts.join(' | ');
+
+		} catch (error) {
+			return "⚠️ 模式比对完成但摘要生成失败";
+		}
+	}
+
+	private static generateDetailedDifferences(diff: any): any {
+		const detailed: any = {
+			tableLevelDifferences: [],
+			columnLevelDifferences: [],
+			typeLevelDifferences: [],
+			summary: {
+				hasTableDifferences: false,
+				hasColumnDifferences: false,
+				hasTypeDifferences: false
+			}
+		};
+
+		// 表级差异
+		const tablesOnlySource = diff?.tables_only_in_source || [];
+		const tablesOnlyTarget = diff?.tables_only_in_target || [];
+
+		if (tablesOnlySource.length > 0 || tablesOnlyTarget.length > 0) {
+			detailed.summary.hasTableDifferences = true;
+		}
+
+		tablesOnlySource.forEach((table: string) => {
+			detailed.tableLevelDifferences.push({
+				type: 'missing_in_target',
+				table: table,
+				description: `表 "${table}" 仅存在于源数据库中`,
+				impact: 'high',
+				recommendation: '在目标数据库中创建此表'
+			});
+		});
+
+		tablesOnlyTarget.forEach((table: string) => {
+			detailed.tableLevelDifferences.push({
+				type: 'missing_in_source',
+				table: table,
+				description: `表 "${table}" 仅存在于目标数据库中`,
+				impact: 'medium',
+				recommendation: '检查是否需要删除此表或在源数据库中添加'
+			});
+		});
+
+		// 列级差异
+		const columnDiffs = diff?.column_diffs || {};
+		Object.entries(columnDiffs).forEach(([table, diffs]: [string, any]) => {
+			detailed.summary.hasColumnDifferences = true;
+
+			const colsOnlySource = diffs.columns_only_in_source || [];
+			const colsOnlyTarget = diffs.columns_only_in_target || [];
+
+			colsOnlySource.forEach((column: string) => {
+				detailed.columnLevelDifferences.push({
+					type: 'column_missing_in_target',
+					table: table,
+					column: column,
+					description: `表 "${table}" 中的列 "${column}" 仅存在于源数据库`,
+					impact: 'high',
+					recommendation: '在目标数据库的此表中添加该列'
+				});
+			});
+
+			colsOnlyTarget.forEach((column: string) => {
+				detailed.columnLevelDifferences.push({
+					type: 'column_missing_in_source',
+					table: table,
+					column: column,
+					description: `表 "${table}" 中的列 "${column}" 仅存在于目标数据库`,
+					impact: 'medium',
+					recommendation: '检查是否需要删除此列或在源数据库中添加'
+				});
+			});
+		});
+
+		// 类型差异
+		const typeDiffs = diff?.type_diffs || {};
+		Object.entries(typeDiffs).forEach(([table, changes]: [string, any]) => {
+			detailed.summary.hasTypeDifferences = true;
+
+			if (Array.isArray(changes)) {
+				changes.forEach((change: any) => {
+					detailed.typeLevelDifferences.push({
+						type: 'type_mismatch',
+						table: table,
+						column: change.column,
+						sourceType: change.source_type,
+						targetType: change.target_type,
+						description: `表 "${table}" 中列 "${change.column}" 的类型不匹配: ${change.source_type} vs ${change.target_type}`,
+						impact: 'high',
+						recommendation: '检查数据兼容性并考虑类型转换'
+					});
+				});
+			}
+		});
+
+		return detailed;
 	}
 }

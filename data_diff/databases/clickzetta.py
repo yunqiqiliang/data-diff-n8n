@@ -96,8 +96,9 @@ class Dialect(BaseDialect):
 @attrs.define(frozen=False, init=False, kw_only=True)
 class Clickzetta(ThreadedDatabase):
     dialect = Dialect()
-    CONNECT_URI_HELP = "clickzetta://<username>:<pwd>@<instance>.<service>/<workspace>"
-    CONNECT_URI_PARAMS = ["virtualcluster", "schema"]
+    CONNECT_URI_HELP = "clickzetta://<username>:<pwd>@<instance>.<service>/<workspace>?schema=<schema>&virtualcluster=<virtualcluster>"
+    CONNECT_URI_PARAMS = ["workspace"]
+    CONNECT_URI_KWPARAMS = []
 
     _args: Dict[str, Any]
     workspace: str
@@ -107,6 +108,19 @@ class Clickzetta(ThreadedDatabase):
         logging.getLogger("clickzetta").setLevel(logging.WARNING)
 
         self._args = kw
+
+        # 如果有host参数，需要分解为instance和service
+        if 'host' in kw and '.' in kw['host']:
+            host_parts = kw['host'].split('.', 1)
+            self._args.setdefault('instance', host_parts[0])
+            self._args.setdefault('service', host_parts[1])
+        else:
+            # 确保必要字段存在
+            self._args.setdefault('instance', '')
+            self._args.setdefault('service', 'uat-api.clickzetta.com')
+
+        self._args.setdefault('workspace', 'default')
+        self._args.setdefault('virtualcluster', 'default_ap')
         self.default_schema = kw.get("schema", "public")
         self.workspace = kw.get("workspace", "default")
 
@@ -114,13 +128,23 @@ class Clickzetta(ThreadedDatabase):
         clickzetta = import_clickzetta()
 
         try:
+            # 添加调试日志
+            logging.error(f"DEBUG: Clickzetta connection args: {self._args}")
+            logging.error(f"DEBUG: username={self._args.get('username', self._args.get('user'))}")
+            logging.error(f"DEBUG: password={'***' if self._args.get('password') else 'None'}")
+            logging.error(f"DEBUG: instance={self._args.get('instance', '')}")
+            logging.error(f"DEBUG: service={self._args.get('service', 'uat-api.clickzetta.com')}")
+            logging.error(f"DEBUG: workspace={self._args.get('workspace', 'default')}")
+            logging.error(f"DEBUG: virtualcluster={self._args.get('virtualcluster', 'default_ap')}")
+            logging.error(f"DEBUG: schema={self.default_schema}")
+
             return clickzetta.connect(
-                username=self._args["username"],
-                password=self._args["password"],
-                instance=self._args["instance"],
-                service=self._args["service"],
-                workspace=self._args["workspace"],
-                vcluster=self._args["virtualcluster"],
+                username=self._args.get("username", self._args.get("user")),
+                password=self._args.get("password", ""),
+                instance=self._args.get("instance", ""),
+                service=self._args.get("service", "uat-api.clickzetta.com"),
+                workspace=self._args.get("workspace", "default"),
+                vcluster=self._args.get("virtualcluster", "default_ap"),
                 schema=self.default_schema,
             )
         except Exception as e:

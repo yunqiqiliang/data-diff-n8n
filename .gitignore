@@ -153,3 +153,6 @@ benchmark_*.png
 
 docker-compose-local.yml
 /n8n/node_modules
+/cleanup_archive
+/debug_scripts
+/legacy_files

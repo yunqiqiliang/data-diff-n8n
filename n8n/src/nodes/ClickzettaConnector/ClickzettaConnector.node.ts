@@ -11,7 +11,7 @@ export class ClickzettaConnector implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Clickzetta Connector',
 		name: 'clickzettaConnector',
-		icon: 'file:clickzetta.svg',
+		icon: 'fa:plug',
 		group: ['transform'],
 		version: 1,
 		description: 'Connect to Clickzetta database for data operations',
@@ -51,6 +51,12 @@ export class ClickzettaConnector implements INodeType {
 						description: 'List all tables in the database',
 						action: 'List all tables in the database',
 					},
+					{
+						name: 'Execute Query',
+						value: 'executeQuery',
+						description: 'Execute custom SQL query',
+						action: 'Execute custom SQL query',
+					},
 				],
 				default: 'testConnection',
 			},
@@ -64,6 +70,34 @@ export class ClickzettaConnector implements INodeType {
 				displayOptions: {
 					show: {
 						operation: ['getSchema', 'listTables'],
+					},
+				},
+			},
+			{
+				displayName: 'SQL Query',
+				name: 'sqlQuery',
+				type: 'string',
+				typeOptions: {
+					rows: 4,
+				},
+				default: '',
+				placeholder: 'SELECT * FROM table_name LIMIT 10',
+				description: 'SQL query to execute',
+				displayOptions: {
+					show: {
+						operation: ['executeQuery'],
+					},
+				},
+			},
+			{
+				displayName: 'Return Raw Results',
+				name: 'returnRawResults',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to return raw query results or formatted data',
+				displayOptions: {
+					show: {
+						operation: ['executeQuery'],
 					},
 				},
 			},
@@ -122,6 +156,55 @@ export class ClickzettaConnector implements INodeType {
 								timestamp: new Date().toISOString(),
 							},
 						});
+						break;
+					case 'executeQuery':
+						const sqlQuery = this.getNodeParameter('sqlQuery', i) as string;
+						const returnRawResults = this.getNodeParameter('returnRawResults', i) as boolean;
+						if (!sqlQuery.trim()) {
+							throw new Error('SQL query is required');
+						}
+						result = await ClickzettaConnector.executeQueryMethod(credentials, sqlQuery);
+
+						// 处理查询结果
+						if (returnRawResults) {
+							returnData.push({
+								json: {
+									operation,
+									success: true,
+									query: sqlQuery,
+									data: result,
+									timestamp: new Date().toISOString(),
+								},
+							});
+						} else {
+							// 格式化结果为多个输出项
+							const formattedResults = ClickzettaConnector.formatQueryResults(result);
+							if (formattedResults.length > 0) {
+								formattedResults.forEach(row => {
+									returnData.push({
+										json: {
+											...row,
+											_meta: {
+												operation,
+												query: sqlQuery,
+												timestamp: new Date().toISOString(),
+											},
+										},
+									});
+								});
+							} else {
+								returnData.push({
+									json: {
+										operation,
+										success: true,
+										query: sqlQuery,
+										message: 'Query executed successfully but returned no results',
+										data: result,
+										timestamp: new Date().toISOString(),
+									},
+								});
+							}
+						}
 						break;
 					default:
 						throw new Error(`Unknown operation: ${operation}`);
@@ -224,6 +307,60 @@ export class ClickzettaConnector implements INodeType {
 			return [];
 		} catch (error: any) {
 			throw new Error(`Failed to list tables: ${error.message}`);
+		}
+	}
+
+	private static async executeQueryMethod(credentials: any, sqlQuery: string): Promise<any> {
+		// 通过后端 API 执行 SQL 查询
+		try {
+			const apiUrl = process.env.CLICKZETTA_QUERY_API_URL || 'http://data-diff-api:8000/api/v1/query/execute';
+
+			const response = await fetch(apiUrl, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					connection: {
+						...credentials,
+						type: 'clickzetta',
+					},
+					query: sqlQuery,
+				}),
+			});
+
+			if (!response.ok) {
+				const errorText = await response.text();
+				throw new Error(`API error: ${response.status} ${errorText}`);
+			}
+
+			const data = await response.json();
+			if (!data.success) {
+				throw new Error(data.error || 'Query execution failed');
+			}
+
+			return data.result || data.data || [];
+		} catch (error: any) {
+			throw new Error(`Failed to execute query: ${error.message}`);
+		}
+	}
+
+	private static formatQueryResults(result: any): any[] {
+		try {
+			// 处理不同的结果格式
+			if (Array.isArray(result)) {
+				return result;
+			} else if (result.rows && Array.isArray(result.rows)) {
+				return result.rows;
+			} else if (result.data && Array.isArray(result.data)) {
+				return result.data;
+			} else if (result.result && Array.isArray(result.result)) {
+				return result.result;
+			}
+
+			// 如果结果不是数组，将其包装为数组
+			return [result];
+		} catch (error) {
+			console.error('Error formatting query results:', error);
+			return [];
 		}
 	}
 

@@ -163,10 +163,15 @@ class ConnectionManager:
             if HAS_DATA_DIFF and hasattr(connection, 'query'):
                 # 使用 data-diff 获取架构信息
                 tables = await self._get_tables_info(connection, schema_name)
+
+                # 使用 db_schema 而不是 schema
+                schema_value = schema_name or config.get("db_schema") or config.get("database", "default")
+
                 return {
                     "status": "success",
                     "database_type": config.get("database_type"),
-                    "schema": schema_name or config.get("database", "default"),
+                    "db_schema": schema_value,  # 使用 db_schema 字段名
+                    "schema": schema_value,     # 为了兼容保留 schema 字段
                     "tables": tables
                 }
             else:
@@ -289,6 +294,7 @@ class ConnectionManager:
             {
                 "name": "users",
                 "schema": schema_name or "public",
+                "db_schema": schema_name or "public",  # 添加 db_schema 字段以保持一致性
                 "columns": [
                     {"name": "id", "type": "bigint", "nullable": False},
                     {"name": "name", "type": "varchar", "nullable": True},
@@ -308,9 +314,12 @@ class ConnectionManager:
             "status": "success",
             "database_type": db_type,
             "schema": config.get("database", "default"),
+            "db_schema": config.get("db_schema") or config.get("database", "default"),  # 添加db_schema字段
             "tables": [
                 {
                     "name": "users",
+                    "schema": config.get("database", "default"),
+                    "db_schema": config.get("db_schema") or config.get("database", "default"),  # 添加db_schema字段
                     "columns": [
                         {"name": "id", "type": "bigint", "nullable": False},
                         {"name": "name", "type": "varchar(100)", "nullable": True},

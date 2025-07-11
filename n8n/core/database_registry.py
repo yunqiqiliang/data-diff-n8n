@@ -245,13 +245,33 @@ class DatabaseRegistry:
 
         # 根据数据库类型构建连接字符串
         if db_type == "clickzetta":
-            # clickzetta://<username>:<pwd>@<instance>.<service>/<workspace>
+            # clickzetta://<username>:<pwd>@<instance>.<service>/<workspace>?schema=<schema>&virtualcluster=<virtualcluster>
             instance = config.get("instance", "")
-            service = config.get("service", "")
+            service = config.get("service", "uat-api.clickzetta.com")  # 默认服务
             workspace = config.get("workspace", "")
             username = config.get("username", "")
             password = config.get("password", "")
-            return f"clickzetta://{username}:{password}@{instance}.{service}/{workspace}"
+
+            # 支持 schema 和 db_schema 两种字段名
+            schema = config.get("schema", config.get("db_schema", "public"))
+
+            # 支持 vcluster 和 virtualcluster 两种字段名
+            virtualcluster = config.get("vcluster", config.get("virtualcluster", "default_ap"))
+
+            # 构建基本 URL
+            base_url = f"clickzetta://{username}:{password}@{instance}.{service}/{workspace}"
+
+            # 添加查询参数
+            params = []
+            if schema:
+                params.append(f"schema={schema}")
+            if virtualcluster:
+                params.append(f"virtualcluster={virtualcluster}")
+
+            if params:
+                base_url += "?" + "&".join(params)
+
+            return base_url
 
         # 对于其他数据库，需要 host 字段
         host = config["host"]
@@ -365,7 +385,19 @@ class DatabaseRegistry:
 
         # 根据数据库类型添加特定的必需字段
         if db_type in ["clickzetta"]:
-            required_fields.extend(["username", "password", "instance", "service", "workspace"])
+            required_fields.extend(["username", "password", "instance", "workspace"])
+
+            # 检查 service 字段，如果不存在就使用默认值
+            if "service" not in config:
+                config["service"] = "uat-api.clickzetta.com"
+
+            # 检查 schema/db_schema 字段，确保至少有一个
+            if "schema" not in config and "db_schema" not in config:
+                config["schema"] = "public"
+
+            # 检查 vcluster/virtualcluster 字段，确保至少有一个
+            if "vcluster" not in config and "virtualcluster" not in config:
+                config["vcluster"] = "default_ap"
         elif db_type in ["postgresql", "mysql", "clickhouse", "redshift", "oracle", "mssql", "vertica"]:
             required_fields.extend(["host", "username", "password", "database"])
         elif db_type == "snowflake":

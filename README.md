@@ -50,7 +50,27 @@ cd data-diff-n8n
 - **Grafana 监控**: http://localhost:3000 (admin/admin123)
 - **Jupyter Lab**: http://localhost:8889 (token=datadiff123)
 
-## 📖 文档
+## � 项目结构
+
+```
+data-diff-n8n/
+├── n8n/                      # N8N 节点和 API 实现
+│   ├── src/nodes/           # 自定义节点 (ClickzettaConnector, DatabaseConnector)
+│   ├── src/credentials/     # 节点凭证定义
+│   └── api/                 # FastAPI 后端服务
+├── data_diff/               # 核心数据比对模块
+├── debug_scripts/           # 调试脚本集合
+├── test_scripts/            # 测试脚本集合
+├── docs_archive/            # 历史文档归档
+├── legacy_files/            # 遗留文件归档
+├── monitoring/              # Prometheus + Grafana 监控
+├── scripts/                 # 工具脚本
+└── tests/                   # 正式测试套件
+```
+
+详细结构说明请查看 [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)
+
+## �📖 文档
 
 - [启动指南](docs/STARTUP_GUIDE.md) - 详细的启动和使用说明
 - [部署检查清单](docs/DEPLOYMENT_CHECKLIST.md) - 部署前准备工作

@@ -60,12 +60,22 @@ def parse_connection_string(conn_str: str) -> Dict[str, Any]:
             # 为ClickZetta添加特殊处理
             if parsed.scheme == 'clickzetta':
                 # 解析服务和实例
+                # 对于 jnsxwfyr.uat-api.clickzetta.com，分解为:
+                # instance = jnsxwfyr, service = uat-api.clickzetta.com
+                if '.' in host:
+                    host_parts = host.split('.', 1)
+                    instance = host_parts[0]
+                    service = host_parts[1]
+                else:
+                    instance = host
+                    service = "clickzetta.com"
+
                 result.update({
-                    "service": host,
-                    "instance": query_params.get("instance", "default"),
+                    "instance": instance,
+                    "service": service,
                     "workspace": parsed.path.lstrip('/'),
-                    "vcluster": query_params.get("virtualcluster", "default"),
-                    "schema": query_params.get("schema")
+                    "virtualcluster": query_params.get("virtualcluster", "default_ap"),  # 使用 virtualcluster 而不是 vcluster
+                    "schema": query_params.get("schema", "public")
                 })
 
             return result

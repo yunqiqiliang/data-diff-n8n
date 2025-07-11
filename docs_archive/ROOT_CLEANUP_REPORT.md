@@ -1,0 +1,236 @@
+# 根目录清理报告
+
+清理时间: 2025年 7月11日 星期五 13时37分35秒 CST
+
+## 清理统计
+
+### debug_scripts
+- 目录: `debug_scripts/`
+- 文件数量: 21
+- 文件列表:
+  - clickzetta_connection_diagnosis.py
+  - debug_api_schema_flow.py
+  - debug_clickzetta_roundtrip.py
+  - debug_clickzetta_schemas.py
+  - debug_clickzetta_tables.py
+  - debug_columns_test.py
+  - debug_direct_connect.py
+  - debug_final_connection.py
+  - debug_from_pg_schema.py
+  - debug_full_roundtrip.py
+  - debug_parameter_parsing.py
+  - debug_parameter_passing.py
+  - debug_parsing_instance.py
+  - debug_postgres_schema.py
+  - debug_row_count.py
+  - debug_schema_comparison.py
+  - demo_complete.py
+  - dev_helper.py
+  - final_columns_test.py
+  - final_validation_test.py
+  - schema_comparison_summary.py
+
+### test_scripts
+- 目录: `test_scripts/`
+- 文件数量: 60
+- 文件列表:
+  - test_actual_schema_comparison.py
+  - test_api_from_pg_schema.py
+  - test_api_no_mock.py
+  - test_clickzetta_connection_api.py
+  - test_clickzetta_connection_flow.py
+  - test_clickzetta_execute_query.js
+  - test_clickzetta_params_api.py
+  - test_clickzetta_params_fixed.py
+  - test_clickzetta_schema_only.py
+  - test_clickzetta_sql_debug.py
+  - test_clickzetta_table_comparison.py
+  - test_columns_fix.py
+  - test_comprehensive.py
+  - test_comprehensive_no_mock.py
+  - test_connection_api.py
+  - test_connection_fix_verification.py
+  - test_connection_parsing_fix.py
+  - test_connection_roundtrip.py
+  - test_correct_api_format.py
+  - test_credential_parameter_architecture.py
+  - test_database_connector_api_comprehensive.py
+  - test_database_connector_api_simple.py
+  - test_database_connector_execute_query.js
+  - test_datadiff_clickzetta_schema.py
+  - test_detailed_schema_check.py
+  - test_detailed_schema_verification.py
+  - test_direct_datadiff.py
+  - test_direct_postgresql.py
+  - test_docker_api_query.sh
+  - test_exclude_columns.py
+  - test_final_architecture.py
+  - test_improved_schema_output.py
+  - test_invoices_schema_debug.py
+  - test_mock_removal.py
+  - test_n8n_formats.py
+  - test_n8n_schema_node.py
+  - test_no_mock_data.py
+  - test_node_naming.py
+  - test_parameter_integration.py
+  - test_parameter_merging.py
+  - test_real_database_connections.py
+  - test_real_db_connection.py
+  - test_real_schema_comparison.py
+  - test_real_schema_query.py
+  - test_refactored_comparison.py
+  - test_response_structure.py
+  - test_schema_api_correct.py
+  - test_schema_comparison.py
+  - test_schema_debug_detailed.py
+  - test_schema_direct.py
+  - test_schema_final_check.py
+  - test_schema_final_summary.py
+  - test_schema_final_verification.py
+  - test_schema_fix_verification.py
+  - test_schema_propagation.py
+  - test_schema_real_verification.py
+  - test_simple_schema.py
+  - test_system_complete.py
+  - test_type_check_fix.py
+  - test_type_checking_fix.py
+
+### docs_archive
+- 目录: `docs_archive/`
+- 文件数量: 10
+- 文件列表:
+  - CLICKZETTA_EXECUTE_QUERY_FEATURE.md
+  - COMPARE_SCHEMA_COMPLETION_REPORT.md
+  - DATABASE_CONNECTOR_API_DEPENDENCIES.md
+  - DATABASE_CONNECTOR_EXECUTE_QUERY_FEATURE.md
+  - DATA_COMPARISON_REFACTOR_REPORT.md
+  - DOCKER_TEST_ENVIRONMENT.md
+  - MOCK_REMOVAL_COMPLETION_REPORT.md
+  - NODE_NAMING_ANALYSIS_REPORT.md
+  - REFACTORING_COMPLETION_REPORT.md
+  - SCHEMA_OUTPUT_IMPROVEMENT_SUMMARY.md
+
+### legacy_files
+- 目录: `legacy_files/`
+- 文件数量: 5
+- 文件列表:
+  - cleanup-old-scripts.sh
+  - cleanup_project.py
+  - docker-start.sh
+  - docker-test-db-query.yml
+  - start_docker_test.sh
+
+## 移动的文件
+
+- debug_scripts: clickzetta_connection_diagnosis.py
+- debug_scripts: debug_api_schema_flow.py
+- debug_scripts: debug_clickzetta_roundtrip.py
+- debug_scripts: debug_clickzetta_schemas.py
+- debug_scripts: debug_clickzetta_tables.py
+- debug_scripts: debug_columns_test.py
+- debug_scripts: debug_direct_connect.py
+- debug_scripts: debug_final_connection.py
+- debug_scripts: debug_from_pg_schema.py
+- debug_scripts: debug_full_roundtrip.py
+- debug_scripts: debug_parameter_parsing.py
+- debug_scripts: debug_parameter_passing.py
+- debug_scripts: debug_parsing_instance.py
+- debug_scripts: debug_postgres_schema.py
+- debug_scripts: debug_row_count.py
+- debug_scripts: debug_schema_comparison.py
+- debug_scripts: demo_complete.py
+- debug_scripts: dev_helper.py
+- debug_scripts: final_columns_test.py
+- debug_scripts: final_validation_test.py
+- debug_scripts: schema_comparison_summary.py
+- docs_archive: CLICKZETTA_EXECUTE_QUERY_FEATURE.md
+- docs_archive: COMPARE_SCHEMA_COMPLETION_REPORT.md
+- docs_archive: DATABASE_CONNECTOR_API_DEPENDENCIES.md
+- docs_archive: DATABASE_CONNECTOR_EXECUTE_QUERY_FEATURE.md
+- docs_archive: DATA_COMPARISON_REFACTOR_REPORT.md
+- docs_archive: DOCKER_TEST_ENVIRONMENT.md
+- docs_archive: MOCK_REMOVAL_COMPLETION_REPORT.md
+- docs_archive: NODE_NAMING_ANALYSIS_REPORT.md
+- docs_archive: REFACTORING_COMPLETION_REPORT.md
+- docs_archive: SCHEMA_OUTPUT_IMPROVEMENT_SUMMARY.md
+- legacy_files: cleanup-old-scripts.sh
+- legacy_files: cleanup_project.py
+- legacy_files: docker-start.sh
+- legacy_files: docker-test-db-query.yml
+- legacy_files: start_docker_test.sh
+- test_scripts: test_actual_schema_comparison.py
+- test_scripts: test_api_from_pg_schema.py
+- test_scripts: test_api_no_mock.py
+- test_scripts: test_clickzetta_connection_api.py
+- test_scripts: test_clickzetta_connection_flow.py
+- test_scripts: test_clickzetta_execute_query.js
+- test_scripts: test_clickzetta_params_api.py
+- test_scripts: test_clickzetta_params_fixed.py
+- test_scripts: test_clickzetta_schema_only.py
+- test_scripts: test_clickzetta_sql_debug.py
+- test_scripts: test_clickzetta_table_comparison.py
+- test_scripts: test_columns_fix.py
+- test_scripts: test_comprehensive.py
+- test_scripts: test_comprehensive_no_mock.py
+- test_scripts: test_connection_api.py
+- test_scripts: test_connection_fix_verification.py
+- test_scripts: test_connection_parsing_fix.py
+- test_scripts: test_connection_roundtrip.py
+- test_scripts: test_correct_api_format.py
+- test_scripts: test_credential_parameter_architecture.py
+- test_scripts: test_database_connector_api_comprehensive.py
+- test_scripts: test_database_connector_api_simple.py
+- test_scripts: test_database_connector_execute_query.js
+- test_scripts: test_datadiff_clickzetta_schema.py
+- test_scripts: test_detailed_schema_check.py
+- test_scripts: test_detailed_schema_verification.py
+- test_scripts: test_direct_datadiff.py
+- test_scripts: test_direct_postgresql.py
+- test_scripts: test_docker_api_query.sh
+- test_scripts: test_exclude_columns.py
+- test_scripts: test_final_architecture.py
+- test_scripts: test_improved_schema_output.py
+- test_scripts: test_invoices_schema_debug.py
+- test_scripts: test_mock_removal.py
+- test_scripts: test_n8n_formats.py
+- test_scripts: test_n8n_schema_node.py
+- test_scripts: test_no_mock_data.py
+- test_scripts: test_node_naming.py
+- test_scripts: test_parameter_integration.py
+- test_scripts: test_parameter_merging.py
+- test_scripts: test_real_database_connections.py
+- test_scripts: test_real_db_connection.py
+- test_scripts: test_real_schema_comparison.py
+- test_scripts: test_real_schema_query.py
+- test_scripts: test_refactored_comparison.py
+- test_scripts: test_response_structure.py
+- test_scripts: test_schema_api_correct.py
+- test_scripts: test_schema_comparison.py
+- test_scripts: test_schema_debug_detailed.py
+- test_scripts: test_schema_direct.py
+- test_scripts: test_schema_final_check.py
+- test_scripts: test_schema_final_summary.py
+- test_scripts: test_schema_final_verification.py
+- test_scripts: test_schema_fix_verification.py
+- test_scripts: test_schema_propagation.py
+- test_scripts: test_schema_real_verification.py
+- test_scripts: test_simple_schema.py
+- test_scripts: test_system_complete.py
+- test_scripts: test_type_check_fix.py
+- test_scripts: test_type_checking_fix.py
+
+## 保留的核心文件
+
+- CODE_OF_CONDUCT.md
+- CONTRIBUTING.md
+- Dockerfile.api
+- LICENSE
+- README.md
+- data-diff-n8n.code-workspace
+- docker-compose.dev.yml
+- health-check.sh
+- poetry.lock
+- pyproject.toml
+- readthedocs.yml
+- ruff.toml
+- start.sh

@@ -106,6 +106,7 @@ class TableComparisonRequest(BaseModel):
     bisection_threshold: Optional[int] = 1024
     case_sensitive: Optional[bool] = True
     threads: Optional[int] = 1
+    strict_type_checking: Optional[bool] = False
 
 
 class SchemaComparisonRequest(BaseModel):
@@ -133,11 +134,13 @@ class ComparisonConfig(BaseModel):
     target_table: str = Field(..., description="目标表名")
     key_columns: List[str] = Field(..., description="主键列")
     exclude_columns: Optional[List[str]] = Field([], description="排除列")
+    columns_to_compare: Optional[List[str]] = Field(None, description="要比对的列（如果为空则比对所有列）")
     method: str = Field("hashdiff", description="比对方法")
     sample_size: Optional[int] = Field(0, description="采样大小")
     threads: Optional[int] = Field(4, description="线程数")
     tolerance: Optional[float] = Field(0.001, description="数值容差")
     case_sensitive: Optional[bool] = Field(True, description="大小写敏感")
+    strict_type_checking: Optional[bool] = Field(False, description="严格类型检查")
 
 
 class ComparisonRequest(BaseModel):
@@ -163,6 +166,69 @@ class ScheduleConfig(BaseModel):
     expression: str = Field(..., description="调度表达式")
     timezone: Optional[str] = Field("UTC", description="时区")
     enabled: Optional[bool] = Field(True, description="是否启用")
+
+
+# 新增：支持嵌套JSON结构的比对请求模型
+class NestedDatabaseConfig(BaseModel):
+    """嵌套数据库配置模型"""
+    database_type: str = Field(..., description="数据库类型")
+    host: Optional[str] = Field(None, description="主机地址")
+    port: Optional[int] = Field(None, description="端口号")
+    username: str = Field(..., description="用户名")
+    password: str = Field(..., description="密码")
+    database: Optional[str] = Field(None, description="数据库名")
+    db_schema: Optional[str] = Field(None, description="模式名")
+    schema_field: Optional[str] = Field(None, alias="schema", description="模式名（别名）")
+    # Clickzetta特定字段
+    instance: Optional[str] = Field(None, description="Clickzetta实例")
+    service: Optional[str] = Field(None, description="Clickzetta服务")
+    workspace: Optional[str] = Field(None, description="Clickzetta工作空间")
+    vcluster: Optional[str] = Field(None, description="Clickzetta虚拟集群")
+    ssl: Optional[bool] = Field(False, description="是否使用SSL")
+
+
+class NestedComparisonConfig(BaseModel):
+    """嵌套比对配置模型"""
+    source_table: str = Field(..., description="源表名")
+    target_table: str = Field(..., description="目标表名")
+    key_columns: List[str] = Field(..., description="主键列")
+    primary_key_columns: Optional[List[str]] = Field(None, description="主键列（兼容字段）")
+    compare_columns: Optional[List[str]] = Field(None, description="比对列")
+    columns_to_compare: Optional[List[str]] = Field(None, description="要比对的列（兼容字段）")
+    exclude_columns: Optional[List[str]] = Field(None, description="排除列")
+    algorithm: Optional[str] = Field("hashdiff", description="比对算法")
+    method: Optional[str] = Field(None, description="比对方法（兼容字段）")
+    threads: Optional[int] = Field(1, description="线程数")
+    sample_size: Optional[int] = Field(None, description="采样大小")
+    tolerance: Optional[float] = Field(0.001, description="数值容差")
+    case_sensitive: Optional[bool] = Field(True, description="大小写敏感")
+    bisection_threshold: Optional[int] = Field(1024, description="二分法阈值")
+    where_condition: Optional[str] = Field(None, description="WHERE条件")
+    strict_type_checking: Optional[bool] = Field(False, description="严格类型检查")
+
+
+class NestedComparisonRequest(BaseModel):
+    """嵌套比对请求模型"""
+    source_config: NestedDatabaseConfig
+    target_config: NestedDatabaseConfig
+    comparison_config: NestedComparisonConfig
+
+
+class NestedSchemaComparisonRequest(BaseModel):
+    """嵌套模式比对请求模型"""
+    source_config: NestedDatabaseConfig
+    target_config: NestedDatabaseConfig
+
+    class Config:
+        extra = "allow"  # 允许额外字段
+
+
+class QueryExecutionRequest(BaseModel):
+    """查询执行请求模型"""
+    connection: Dict[str, Any] = Field(..., description="数据库连接配置")
+    query: str = Field(..., description="要执行的SQL查询")
+    limit: Optional[int] = Field(None, description="结果限制数量")
+    timeout: Optional[int] = Field(30, description="查询超时时间（秒）")
 
 
 # API 端点实现
@@ -220,13 +286,24 @@ async def test_connection(db_config: dict):
         if db_type == "clickzetta":
             try:
                 import clickzetta
+
+                # 处理instance和service参数
+                if "host" in db_config and "." in db_config["host"]:
+                    # 从host中解析instance和service
+                    host_parts = db_config["host"].split(".", 1)
+                    instance = db_config.get("instance", host_parts[0])
+                    service = db_config.get("service", host_parts[1])
+                else:
+                    instance = db_config.get("instance", "")
+                    service = db_config.get("service", "uat-api.clickzetta.com")
+
                 conn = clickzetta.connect(
                     username=db_config["username"],
                     password=db_config["password"],
-                    service=db_config["service"],
-                    instance=db_config["instance"],
+                    service=service,
+                    instance=instance,
                     workspace=db_config["workspace"],
-                    vcluster=db_config["vcluster"],
+                    vcluster=db_config.get("vcluster", db_config.get("virtualcluster")),  # 支持两种参数名
                     schema=db_config.get("schema")
                 )
                 with conn.cursor() as cursor:
@@ -405,21 +482,45 @@ async def get_comparison_result(comparison_id: str):
 
     except Exception as e:
         logger.error(f"Failed to get comparison result: {e}", exc_info=True)
+        # 提供详细的错误信息，包括异常类型和traceback
+        import traceback
+        error_details = {
+            "error_type": type(e).__name__,
+            "error_message": str(e),
+            "traceback": traceback.format_exc() if logger.isEnabledFor(logging.DEBUG) else None
+        }
+
         return {
             "comparison_id": comparison_id,
             "status": "error",
-            "message": f"获取比对结果失败: {str(e)}"
+            "message": f"获取比对结果失败: {str(e)}",
+            "error_message": str(e),
+            "error_details": error_details
         }
+
+
+@app.get("/api/v1/compare/results/{comparison_id}")
+async def get_comparison_result(comparison_id: str):
+    """获取比对结果"""
+    try:
+        from .utils import get_result_from_storage
+        result = get_result_from_storage(comparison_id)
+
+        if result is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"未找到比对任务 {comparison_id} 的结果"
+            )
+
+        return result
+    except HTTPException as he:
+        raise
+    except Exception as e:
+        logger.error(f"获取比对结果失败: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"获取比对结果失败: {str(e)}"
         )
-
-
-@app.get("/api/v1/compare/results/{comparison_id}")
-async def get_comparison_result_alias(comparison_id: str):
-    """获取比对结果 - 别名端点，与 /api/v1/comparisons/{comparison_id} 功能相同"""
-    return await get_comparison_result(comparison_id)
 
 
 @app.post("/api/v1/compare/tables", response_model=Dict[str, Any])
@@ -501,7 +602,7 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
         if not key_param:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="请求参数无效：缺少必要参数 key_columns, primary_key_columns 或对应的数组格式"
+                detail="请求参数无效：缺少必要参数 key_columns, 或对应的数组格式"
             )
 
         # 检查其他必要参数
@@ -583,11 +684,18 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
         elif not isinstance(case_sensitive, bool):
             case_sensitive = True
 
+        strict_type_checking = params.get('strict_type_checking')
+        if isinstance(strict_type_checking, str):
+            strict_type_checking = strict_type_checking.lower() == 'true'
+        elif not isinstance(strict_type_checking, bool):
+            strict_type_checking = False
+
         comparison_config = {
             "source_table": params['source_table'],
             "target_table": params['target_table'],
             "key_columns": primary_keys,
             "compare_columns": compare_cols,
+            "columns_to_compare": compare_cols,  # 添加这个字段以确保兼容性
             "update_column": update_keys[0] if update_keys else None,
             "source_filter": params.get('where_condition'),
             "target_filter": params.get('where_condition'),
@@ -595,7 +703,8 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
             "sample_size": sample_size,
             "threads": threads,
             "case_sensitive": case_sensitive,
-            "enable_sampling": sample_size is not None
+            "enable_sampling": sample_size is not None,
+            "strict_type_checking": strict_type_checking
         }
 
         logger.info(f"比对配置: {comparison_config}")
@@ -978,6 +1087,302 @@ async def list_tables(db_config: dict):
         )
 
 
+@app.post("/api/v1/query/execute")
+async def execute_query(request: QueryExecutionRequest):
+    """执行SQL查询"""
+    try:
+        connection_config = request.connection
+        sql_query = request.query.strip()
+
+        if not sql_query:
+            raise HTTPException(status_code=400, detail="SQL查询不能为空")
+
+        # 获取数据库类型
+        db_type = connection_config.get("type") or connection_config.get("database_type")
+
+        if not db_type:
+            raise HTTPException(status_code=400, detail="数据库类型未指定")
+
+        logger.info(f"Executing query on {db_type}: {sql_query[:100]}...")
+
+        results = []
+
+        if db_type == "clickzetta":
+            import clickzetta
+            conn = clickzetta.connect(
+                username=connection_config["username"],
+                password=connection_config["password"],
+                service=connection_config["service"],
+                instance=connection_config["instance"],
+                workspace=connection_config["workspace"],
+                vcluster=connection_config["vcluster"],
+                schema=connection_config.get("schema")
+            )
+            with conn.cursor() as cursor:
+                cursor.execute(sql_query)
+                # 获取列名
+                columns = [desc[0] for desc in cursor.description] if cursor.description else []
+                # 获取数据
+                rows = cursor.fetchall()
+                # 转换为字典列表
+                results = [dict(zip(columns, row)) for row in rows]
+            conn.close()
+
+        elif db_type in ("postgres", "postgresql"):
+            import psycopg2
+            import psycopg2.extras
+            conn = psycopg2.connect(
+                host=connection_config["host"],
+                port=connection_config["port"],
+                user=connection_config["username"],
+                password=connection_config["password"],
+                dbname=connection_config["database"]
+            )
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(sql_query)
+                results = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+
+        elif db_type == "mysql":
+            import mysql.connector
+            conn = mysql.connector.connect(
+                host=connection_config["host"],
+                port=connection_config["port"],
+                user=connection_config["username"],
+                password=connection_config["password"],
+                database=connection_config["database"]
+            )
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(sql_query)
+            results = cursor.fetchall()
+            cursor.close()
+            conn.close()
+
+        elif db_type in ("mssql", "sqlserver"):
+            import pyodbc
+            conn_str = (
+                f"DRIVER={{ODBC Driver 17 for SQL Server}};"
+                f"SERVER={connection_config['host']},{connection_config['port']};"
+                f"DATABASE={connection_config['database']};"
+                f"UID={connection_config['username']};PWD={connection_config['password']}"
+            )
+            conn = pyodbc.connect(conn_str)
+            cursor = conn.cursor()
+            cursor.execute(sql_query)
+
+            # 获取列名
+            columns = [column[0] for column in cursor.description] if cursor.description else []
+            # 获取数据
+            rows = cursor.fetchall()
+            # 转换为字典列表
+            results = [dict(zip(columns, row)) for row in rows]
+
+            cursor.close()
+            conn.close()
+
+        elif db_type == "oracle":
+            import cx_Oracle
+            dsn = cx_Oracle.makedsn(connection_config["host"], connection_config["port"],
+                                   service_name=connection_config["database"])
+            conn = cx_Oracle.connect(
+                user=connection_config["username"],
+                password=connection_config["password"],
+                dsn=dsn
+            )
+            cursor = conn.cursor()
+            cursor.execute(sql_query)
+
+            # 获取列名
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            # 获取数据
+            rows = cursor.fetchall()
+            # 转换为字典列表
+            results = [dict(zip(columns, row)) for row in rows]
+
+            cursor.close()
+            conn.close()
+
+        elif db_type in ("trino", "presto"):
+            from trino.dbapi import connect as trino_connect
+            conn = trino_connect(
+                host=connection_config["host"],
+                port=int(connection_config["port"]),
+                user=connection_config["username"],
+                catalog=connection_config.get("catalog", "hive"),
+                schema=connection_config.get("schema", "default")
+            )
+            cursor = conn.cursor()
+            cursor.execute(sql_query)
+
+            # 获取列名
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            # 获取数据
+            rows = cursor.fetchall()
+            # 转换为字典列表
+            results = [dict(zip(columns, row)) for row in rows]
+
+            cursor.close()
+            conn.close()
+
+        elif db_type == "duckdb":
+            import duckdb
+            conn = duckdb.connect(database=connection_config["database"])
+            cursor = conn.cursor()
+            cursor.execute(sql_query)
+
+            # 获取列名
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            # 获取数据
+            rows = cursor.fetchall()
+            # 转换为字典列表
+            results = [dict(zip(columns, row)) for row in rows]
+
+            conn.close()
+
+        elif db_type == "vertica":
+            import vertica_python
+            conn = vertica_python.connect(
+                host=connection_config["host"],
+                port=connection_config["port"],
+                user=connection_config["username"],
+                password=connection_config["password"],
+                database=connection_config["database"]
+            )
+            cursor = conn.cursor()
+            cursor.execute(sql_query)
+
+            # 获取列名
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            # 获取数据
+            rows = cursor.fetchall()
+            # 转换为字典列表
+            results = [dict(zip(columns, row)) for row in rows]
+
+            cursor.close()
+            conn.close()
+
+        elif db_type == "clickhouse":
+            import clickhouse_driver
+            client = clickhouse_driver.Client(
+                host=connection_config["host"],
+                port=connection_config["port"],
+                user=connection_config["username"],
+                password=connection_config["password"],
+                database=connection_config["database"]
+            )
+            # ClickHouse 返回的是元组列表，需要获取列名
+            result = client.execute(sql_query, with_column_types=True)
+            columns = [col[0] for col in result[1]]
+            rows = result[0]
+            # 转换为字典列表
+            results = [dict(zip(columns, row)) for row in rows]
+
+        elif db_type == "snowflake":
+            import snowflake.connector
+            conn = snowflake.connector.connect(
+                user=connection_config["username"],
+                password=connection_config["password"],
+                account=connection_config["account"],
+                warehouse=connection_config.get("warehouse"),
+                database=connection_config["database"],
+                schema=connection_config.get("schema")
+            )
+            cursor = conn.cursor()
+            cursor.execute(sql_query)
+
+            # 获取列名
+            columns = [desc[0] for desc in cursor.description] if cursor.description else []
+            # 获取数据
+            rows = cursor.fetchall()
+            # 转换为字典列表
+            results = [dict(zip(columns, row)) for row in rows]
+
+            cursor.close()
+            conn.close()
+
+        elif db_type == "bigquery":
+            from google.cloud import bigquery
+            from google.oauth2 import service_account
+            
+            # 如果提供了服务账号密钥
+            if connection_config.get("service_account_key"):
+                credentials = service_account.Credentials.from_service_account_info(
+                    connection_config["service_account_key"]
+                )
+                client = bigquery.Client(
+                    credentials=credentials,
+                    project=connection_config["project_id"]
+                )
+            else:
+                # 使用默认凭证
+                client = bigquery.Client(project=connection_config["project_id"])
+            
+            query_job = client.query(sql_query)
+            rows = query_job.result()
+
+            # 转换为字典列表
+            results = [dict(row) for row in rows]
+
+        elif db_type == "redshift":
+            import psycopg2
+            import psycopg2.extras
+            # Redshift 使用 PostgreSQL 协议
+            conn = psycopg2.connect(
+                host=connection_config["host"],
+                port=connection_config["port"],
+                user=connection_config["username"],
+                password=connection_config["password"],
+                dbname=connection_config["database"]
+            )
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                cursor.execute(sql_query)
+                results = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+
+        elif db_type == "databricks":
+            from databricks import sql
+            with sql.connect(
+                server_hostname=connection_config["server_hostname"],
+                http_path=connection_config["http_path"],
+                access_token=connection_config["access_token"]
+            ) as conn:
+                with conn.cursor() as cursor:
+                    cursor.execute(sql_query)
+                    
+                    # 获取列名
+                    columns = [desc[0] for desc in cursor.description] if cursor.description else []
+                    # 获取数据
+                    rows = cursor.fetchall()
+                    # 转换为字典列表
+                    results = [dict(zip(columns, row)) for row in rows]
+
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持的数据库类型: {db_type}")
+
+        # 应用结果限制
+        if request.limit and request.limit > 0:
+            results = results[:request.limit]
+
+        return {
+            "success": True,
+            "result": results,
+            "query": sql_query,
+            "database_type": db_type,
+            "row_count": len(results),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+    except HTTPException as http_exc:
+        # 重新抛出 HTTPException，不要包装
+        raise http_exc
+    except Exception as e:
+        logger.error(f"Query execution failed: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"查询执行失败: {str(e)}"
+        )
+
+
 # 后台任务函数
 async def execute_comparison_async(
     comparison_id: str,
@@ -1021,7 +1426,8 @@ async def execute_comparison_async(
         error_result = {
             "status": "failed",
             "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "config": comparison_config  # 添加配置信息以便调试
         }
         from .utils import save_result_to_storage
         save_result_to_storage(comparison_id, error_result)
@@ -1063,3 +1469,186 @@ async def compare_tables_query_endpoint(request: Request, background_tasks: Back
     """处理表比对查询请求 - 专为 n8n 适配的路由"""
     # 直接调用主要端点的处理逻辑
     return await compare_tables_endpoint(request, background_tasks)
+
+
+@app.post("/api/v1/compare/tables/nested", response_model=Dict[str, Any])
+async def compare_tables_nested_endpoint(request: NestedComparisonRequest, background_tasks: BackgroundTasks):
+    """处理嵌套JSON结构的表比对请求"""
+    try:
+        logger.info(f"收到嵌套结构比对请求")
+
+        # 转换数据库配置
+        def convert_db_config(config: NestedDatabaseConfig) -> Dict[str, Any]:
+            """转换数据库配置为内部格式"""
+            # 优先使用db_schema，如果没有则使用schema_field，最后才使用默认值
+            schema_value = config.db_schema or config.schema_field or "public"
+            logger.error(f"DEBUG: convert_db_config input - database_type={config.database_type}, db_schema={config.db_schema}, schema_field={config.schema_field}")
+
+            if config.database_type.lower() == "postgresql":
+                result = {
+                    "database_type": "postgresql",  # 保留原始database_type字段
+                    "driver": "postgresql",
+                    "username": config.username,  # 使用username而不是user
+                    "password": config.password,
+                    "host": config.host or "localhost",
+                    "port": config.port or 5432,
+                    "database": config.database,
+                    "schema": schema_value
+                }
+                logger.error(f"DEBUG: PostgreSQL config result - schema={result.get('schema')}")
+                return result
+            elif config.database_type.lower() == "clickzetta":
+                result = {
+                    "database_type": "clickzetta",  # 保留原始database_type字段
+                    "driver": "clickzetta",
+                    "username": config.username,  # 使用username而不是user
+                    "password": config.password,
+                    "instance": config.instance,
+                    "service": config.service,
+                    "workspace": config.workspace,
+                    "schema": schema_value,  # 统一使用schema字段
+                    "vcluster": config.vcluster or "default_ap"
+                }
+                logger.error(f"DEBUG: Clickzetta config result - schema={result.get('schema')}, db_schema input was={config.db_schema}")
+                return result
+            else:
+                raise ValueError(f"不支持的数据库类型: {config.database_type}")
+
+        source_db_config = convert_db_config(request.source_config)
+        target_db_config = convert_db_config(request.target_config)
+
+        # 处理主键列（支持两个字段名）
+        key_columns = request.comparison_config.key_columns
+        if not key_columns and request.comparison_config.primary_key_columns:
+            key_columns = request.comparison_config.primary_key_columns
+
+        if not key_columns:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="必须指定 key_columns 或 primary_key_columns"
+            )
+
+        # 处理比对列（支持两个字段名）
+        compare_columns = request.comparison_config.compare_columns or request.comparison_config.columns_to_compare or []
+
+        # 构建比对配置
+        comparison_config = {
+            "source_table": request.comparison_config.source_table,
+            "target_table": request.comparison_config.target_table,
+            "key_columns": key_columns,
+            "compare_columns": compare_columns,
+            "columns_to_compare": compare_columns,  # 添加这个字段以确保兼容性
+            "exclude_columns": request.comparison_config.exclude_columns or [],
+            "algorithm": request.comparison_config.algorithm or request.comparison_config.method or "hashdiff",
+            "threads": request.comparison_config.threads or 1,
+            "sample_size": request.comparison_config.sample_size or 10000,  # 提供默认值
+            "tolerance": request.comparison_config.tolerance or 0.001,
+            "case_sensitive": request.comparison_config.case_sensitive if request.comparison_config.case_sensitive is not None else True,
+            "bisection_threshold": request.comparison_config.bisection_threshold or 1024,
+            "where_condition": request.comparison_config.where_condition,
+            "strict_type_checking": request.comparison_config.strict_type_checking or False
+        }
+
+        logger.info(f"转换后的配置 - 源: {source_db_config['driver']}, 目标: {target_db_config['driver']}")
+        logger.info(f"比对配置: {comparison_config}")
+
+        # 生成比对ID
+        comparison_id = str(uuid.uuid4())
+        logger.info(f"创建嵌套结构比对任务 {comparison_id}")
+
+        # 异步执行比对
+        background_tasks.add_task(
+            execute_comparison_async,
+            comparison_id,
+            source_db_config,
+            target_db_config,
+            comparison_config
+        )
+
+        return {
+            "comparison_id": comparison_id,
+            "status": "started",
+            "message": "嵌套结构表比对任务已启动",
+            "source_type": source_db_config["driver"],
+            "target_type": target_db_config["driver"]
+        }
+
+    except HTTPException as he:
+        logger.error(f"HTTP异常: {he}")
+        raise
+    except ValueError as ve:
+        logger.error(f"嵌套比对请求参数错误: {ve}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as e:
+        logger.error(f"嵌套结构表比对失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"嵌套结构表比对失败: {str(e)}"
+        )
+
+
+@app.post("/api/v1/compare/schemas/nested", response_model=Dict[str, Any])
+async def compare_schemas_nested_endpoint(request: NestedSchemaComparisonRequest):
+    """处理嵌套JSON结构的模式比对请求"""
+    try:
+        logger.info(f"收到嵌套结构模式比对请求")
+
+        # 转换数据库配置（复用表比对的转换函数）
+        def convert_db_config(config: NestedDatabaseConfig) -> Dict[str, Any]:
+            """转换数据库配置为内部格式"""
+            # 优先使用db_schema，如果没有则使用schema_field，最后才使用默认值
+            schema_value = config.db_schema or config.schema_field or "public"
+
+            if config.database_type.lower() == "postgresql":
+                return {
+                    "database_type": "postgresql",
+                    "driver": "postgresql",
+                    "username": config.username,
+                    "password": config.password,
+                    "host": config.host or "localhost",
+                    "port": config.port or 5432,
+                    "database": config.database,
+                    "schema": schema_value
+                }
+            elif config.database_type.lower() == "clickzetta":
+                return {
+                    "database_type": "clickzetta",
+                    "driver": "clickzetta",
+                    "username": config.username,
+                    "password": config.password,
+                    "instance": config.instance,
+                    "service": config.service,
+                    "workspace": config.workspace,
+                    "schema": schema_value,
+                    "vcluster": config.vcluster or "default_ap"
+                }
+            else:
+                raise ValueError(f"不支持的数据库类型: {config.database_type}")
+
+        source_db_config = convert_db_config(request.source_config)
+        target_db_config = convert_db_config(request.target_config)
+
+        logger.info(f"转换后的配置 - 源: {source_db_config['driver']}, 目标: {target_db_config['driver']}")
+
+        # 直接执行模式比对（不需要异步，因为模式比对通常很快）
+        result = await comparison_engine.compare_schemas(
+            source_config=source_db_config,
+            target_config=target_db_config
+        )
+
+        return {
+            "status": "completed",
+            "result": result,
+            "source_type": source_db_config["driver"],
+            "target_type": target_db_config["driver"]
+        }
+
+    except ValueError as ve:
+        logger.error(f"嵌套模式比对请求参数错误: {ve}")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+    except Exception as e:
+        logger.error(f"嵌套结构模式比对失败: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"嵌套结构模式比对失败: {str(e)}"
+        )
