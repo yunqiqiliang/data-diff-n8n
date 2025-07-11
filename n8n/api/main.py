@@ -1303,7 +1303,7 @@ async def execute_query(request: QueryExecutionRequest):
         elif db_type == "bigquery":
             from google.cloud import bigquery
             from google.oauth2 import service_account
-            
+
             # 如果提供了服务账号密钥
             if connection_config.get("service_account_key"):
                 credentials = service_account.Credentials.from_service_account_info(
@@ -1316,7 +1316,7 @@ async def execute_query(request: QueryExecutionRequest):
             else:
                 # 使用默认凭证
                 client = bigquery.Client(project=connection_config["project_id"])
-            
+
             query_job = client.query(sql_query)
             rows = query_job.result()
 
@@ -1348,7 +1348,7 @@ async def execute_query(request: QueryExecutionRequest):
             ) as conn:
                 with conn.cursor() as cursor:
                     cursor.execute(sql_query)
-                    
+
                     # 获取列名
                     columns = [desc[0] for desc in cursor.description] if cursor.description else []
                     # 获取数据

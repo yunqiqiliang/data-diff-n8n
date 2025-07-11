@@ -169,7 +169,7 @@ export class DatabaseConnector implements INodeType {
 							throw new Error('SQL query is required');
 						}
 						result = await DatabaseConnector.executeQueryMethod(connectionConfig, sqlQuery);
-						
+
 						// 处理查询结果
 						if (returnRawResults) {
 							returnData.push({
@@ -424,7 +424,7 @@ export class DatabaseConnector implements INodeType {
 			} else if (result.result && Array.isArray(result.result)) {
 				return result.result;
 			}
-			
+
 			// 如果结果不是数组，将其包装为数组
 			return [result];
 		} catch (error) {
