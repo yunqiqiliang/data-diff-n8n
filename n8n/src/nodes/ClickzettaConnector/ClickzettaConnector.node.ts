@@ -57,6 +57,12 @@ export class ClickzettaConnector implements INodeType {
 						description: 'Execute custom SQL query',
 						action: 'Execute custom SQL query',
 					},
+					{
+						name: 'Prepare for Comparison',
+						value: 'prepareComparison',
+						description: 'Get connection info and tables for data comparison',
+						action: 'Prepare Clickzetta for comparison',
+					},
 				],
 				default: 'testConnection',
 			},
@@ -69,7 +75,7 @@ export class ClickzettaConnector implements INodeType {
 				description: 'Name of the schema to query (optional)',
 				displayOptions: {
 					show: {
-						operation: ['getSchema', 'listTables'],
+						operation: ['getSchema', 'listTables', 'prepareComparison'],
 					},
 				},
 			},
@@ -101,6 +107,44 @@ export class ClickzettaConnector implements INodeType {
 					},
 				},
 			},
+			{
+				displayName: 'Include Sample Data',
+				name: 'includeSampleData',
+				type: 'boolean',
+				default: false,
+				description: 'Include sample rows from each table',
+				displayOptions: {
+					show: {
+						operation: ['prepareComparison'],
+					},
+				},
+			},
+			{
+				displayName: 'Sample Size',
+				name: 'sampleSize',
+				type: 'number',
+				default: 5,
+				description: 'Number of sample rows to include per table',
+				displayOptions: {
+					show: {
+						operation: ['prepareComparison'],
+						includeSampleData: [true],
+					},
+				},
+			},
+			{
+				displayName: 'Table Filter',
+				name: 'tableFilter',
+				type: 'string',
+				default: '',
+				placeholder: 'e.g., user%, order_*',
+				description: 'Filter tables by pattern (SQL LIKE syntax)',
+				displayOptions: {
+					show: {
+						operation: ['prepareComparison'],
+					},
+				},
+			},
 		],
 	};
 
@@ -108,10 +152,12 @@ export class ClickzettaConnector implements INodeType {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
 		const operation = this.getNodeParameter('operation', 0) as string;
-		const credentials = await this.getCredentials('clickzettaApi');
+		let credentials: any = null;
 
 		for (let i = 0; i < items.length; i++) {
 			try {
+				// 获取凭据
+				credentials = await this.getCredentials('clickzettaApi', i);
 				let result: any = {};
 
 				switch (operation) {
@@ -153,6 +199,53 @@ export class ClickzettaConnector implements INodeType {
 								success: true,
 								tables,
 								data: result,
+								timestamp: new Date().toISOString(),
+							},
+						});
+						break;
+					case 'prepareComparison':
+						// 使用默认值避免参数错误
+						const schemaForComparison = this.getNodeParameter('schemaName', i, '') as string;
+						const includeSampleData = this.getNodeParameter('includeSampleData', i, false) as boolean;
+						const sampleSize = this.getNodeParameter('sampleSize', i, 5) as number;
+						const tableFilter = this.getNodeParameter('tableFilter', i, '') as string;
+						
+						// 获取连接信息和表列表
+						result = await ClickzettaConnector.prepareForComparisonMethod(
+							credentials,
+							schemaForComparison,
+							includeSampleData,
+							sampleSize,
+							tableFilter
+						);
+						
+						// 生成 Clickzetta 连接 URL
+						const comparisonUrl = ClickzettaConnector.buildConnectionUrl(credentials);
+						
+						// 生成比对专用的输出格式
+						returnData.push({
+							json: {
+								operation,
+								success: true,
+								connectionUrl: comparisonUrl,
+								connectionConfig: { ...credentials, type: 'clickzetta' },
+								tables: result.tables || [],
+								schema: schemaForComparison || credentials.schema,
+								statistics: result.statistics || {},
+								sampleData: result.sampleData || {},
+								metadata: {
+									totalTables: result.tables?.length || 0,
+									includedSampleData: includeSampleData,
+									preparedAt: new Date().toISOString(),
+								},
+								// 为数据比对节点准备的特殊字段
+								comparisonReady: true,
+								comparisonConfig: {
+									// 避免循环引用，创建新对象
+									source_config: { ...credentials, type: 'clickzetta' },
+									available_tables: [...(result.tables || [])],
+									database_type: 'clickzetta',
+								},
 								timestamp: new Date().toISOString(),
 							},
 						});
@@ -211,13 +304,35 @@ export class ClickzettaConnector implements INodeType {
 				}
 
 			} catch (error: any) {
+				// 提供更详细的错误信息
+				const errorData: any = {
+					operation,
+					success: false,
+					error: error?.message || 'Unknown error',
+					timestamp: new Date().toISOString(),
+				};
+				
+				// 如果是凭据错误，添加提示
+				if (error?.message?.includes('Could not get parameter') || error?.message?.includes('credentials')) {
+					errorData.hint = 'Please ensure Clickzetta credentials are properly configured';
+					errorData.errorType = 'credentials';
+					errorData.credentialName = 'clickzettaApi';
+					errorData.requiredFields = ['username', 'password', 'instance', 'service', 'workspace', 'vcluster'];
+				}
+				
+				// 如果有凭据信息，添加部分调试信息（不包含敏感信息）
+				if (credentials) {
+					errorData.connectionInfo = {
+						instance: credentials.instance || 'not set',
+						service: credentials.service || 'not set',
+						workspace: credentials.workspace || 'not set',
+						vcluster: credentials.vcluster || 'not set',
+						schema: credentials.schema || 'not set',
+					};
+				}
+				
 				returnData.push({
-					json: {
-						operation,
-						success: false,
-						error: error?.message || 'Unknown error',
-						timestamp: new Date().toISOString(),
-					},
+					json: errorData,
 				});
 			}
 		}
@@ -372,7 +487,7 @@ export class ClickzettaConnector implements INodeType {
 
 	private static formatTablesForSelection(result: any, credentials: any): any[] {
 		try {
-			let tables: string[] = [];
+			let tables: any[] = [];
 
 			// 处理不同 API 返回格式
 			if (Array.isArray(result)) {
@@ -385,16 +500,136 @@ export class ClickzettaConnector implements INodeType {
 
 			// 转换为选择选项格式
 			return tables.map(table => {
-				const fullTableName = credentials.schema ? `${credentials.schema}.${table}` : table;
+				// 处理表名可能是对象的情况
+				let tableName: string;
+				if (typeof table === 'string') {
+					tableName = table;
+				} else if (table && typeof table === 'object') {
+					// 尝试从对象中提取表名
+					tableName = table.name || table.tableName || table.table_name || 
+							   table.TABLE_NAME || table.Name || String(table);
+				} else {
+					tableName = String(table);
+				}
+				
+				const fullTableName = credentials.schema ? `${credentials.schema}.${tableName}` : tableName;
 				return {
 					name: fullTableName,
 					value: fullTableName,
-					description: `Clickzetta table: ${table}`,
+					description: `Clickzetta table: ${tableName}`,
 				};
 			});
 		} catch (error) {
 			console.error('Error formatting Clickzetta tables for selection:', error);
 			return [];
+		}
+	}
+
+	private static async prepareForComparisonMethod(
+		credentials: any,
+		schema: string,
+		includeSampleData: boolean,
+		sampleSize: number,
+		tableFilter: string
+	): Promise<any> {
+		try {
+			// 1. 首先获取表列表
+			const tablesResult = await ClickzettaConnector.listTablesMethod(credentials, schema);
+			
+			// 调试：查看原始返回数据
+			console.log('ClickZetta listTables 原始返回:', JSON.stringify(tablesResult, null, 2));
+			
+			let tables = ClickzettaConnector.formatTablesForSelection(tablesResult, credentials);
+			
+			// 2. 应用表过滤器
+			if (tableFilter) {
+				const filterPattern = tableFilter.replace(/%/g, '.*').replace(/_/g, '.');
+				const filterRegex = new RegExp(filterPattern, 'i');
+				tables = tables.filter(table => filterRegex.test(table.name));
+			}
+			
+			// 3. 获取 Clickzetta 特定的统计信息
+			const statistics: any = {
+				totalTables: tables.length,
+				schema: schema || credentials.schema || 'default',
+				databaseType: 'clickzetta',
+				workspace: credentials.workspace,
+				vcluster: credentials.vcluster,
+			};
+			
+			// 4. 如果需要，获取示例数据
+			let sampleData: any = {};
+			if (includeSampleData && tables.length > 0) {
+				// 限制采样的表数量，避免性能问题
+				const tablesToSample = tables.slice(0, 10);
+				
+				for (const table of tablesToSample) {
+					try {
+						// 使用 TABLESAMPLE 进行高效采样
+						const query = `SELECT * FROM ${table.value} TABLESAMPLE (${sampleSize} ROWS)`;
+						const queryResult = await ClickzettaConnector.executeQueryMethod(credentials, query);
+						
+						if (queryResult && queryResult.rows) {
+							sampleData[table.value] = {
+								rows: queryResult.rows,
+								rowCount: queryResult.rows.length,
+								columns: queryResult.rows.length > 0 ? Object.keys(queryResult.rows[0]) : [],
+								samplingMethod: 'TABLESAMPLE',
+							};
+						}
+					} catch (error) {
+						// 如果 TABLESAMPLE 失败，尝试使用 LIMIT
+						try {
+							const fallbackQuery = `SELECT * FROM ${table.value} LIMIT ${sampleSize}`;
+							const fallbackResult = await ClickzettaConnector.executeQueryMethod(credentials, fallbackQuery);
+							
+							if (fallbackResult && fallbackResult.rows) {
+								sampleData[table.value] = {
+									rows: fallbackResult.rows,
+									rowCount: fallbackResult.rows.length,
+									columns: fallbackResult.rows.length > 0 ? Object.keys(fallbackResult.rows[0]) : [],
+									samplingMethod: 'LIMIT',
+								};
+							}
+						} catch (fallbackError) {
+							console.warn(`Failed to get sample data for ${table.value}:`, fallbackError);
+							sampleData[table.value] = {
+								error: 'Failed to retrieve sample data',
+								rowCount: 0,
+								columns: [],
+							};
+						}
+					}
+				}
+			}
+			
+			// 5. 获取 Clickzetta 特定的元数据
+			try {
+				// 获取版本信息
+				const versionQuery = 'SELECT version() as version';
+				const versionResult = await ClickzettaConnector.executeQueryMethod(credentials, versionQuery);
+				if (versionResult && versionResult.rows && versionResult.rows.length > 0) {
+					statistics.clickzettaVersion = versionResult.rows[0].version || 'Unknown';
+				}
+				
+				// 可以添加更多 Clickzetta 特定的元数据查询
+			} catch (error) {
+				console.warn('Failed to get Clickzetta metadata:', error);
+			}
+			
+			return {
+				tables,
+				statistics,
+				sampleData,
+				connectionValid: true,
+				preparedAt: new Date().toISOString(),
+				clickzettaSpecific: {
+					supportsTablesample: true,
+					supportedSamplingMethods: ['TABLESAMPLE', 'SYSTEM', 'ROW'],
+				},
+			};
+		} catch (error: any) {
+			throw new Error(`Failed to prepare Clickzetta for comparison: ${error.message}`);
 		}
 	}
 }

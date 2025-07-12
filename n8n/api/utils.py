@@ -5,8 +5,15 @@
 from typing import Dict, Any, Optional
 import logging
 import urllib.parse
+from datetime import datetime
+from fastapi import HTTPException, status
+from .response_models import ErrorDetail, ErrorCodes
 
 logger = logging.getLogger(__name__)
+
+# 任务状态存储（简单实现，生产环境应使用Redis）
+_task_status = {}
+_task_progress = {}
 
 def parse_connection_string(conn_str: str) -> Dict[str, Any]:
     """从连接字符串解析数据库配置"""
@@ -102,6 +109,12 @@ def save_result_to_storage(comparison_id: str, result: Dict[str, Any]) -> None:
         with open(file_path, 'w') as f:
             json.dump(result, f)
         logger.info(f"Saved result for comparison {comparison_id}")
+        
+        # 更新任务状态
+        if result.get("status") == "failed":
+            update_task_status(comparison_id, "failed")
+        else:
+            update_task_status(comparison_id, "completed")
     except Exception as e:
         logger.error(f"Failed to save result for comparison {comparison_id}: {e}")
 
@@ -123,3 +136,71 @@ def get_result_from_storage(comparison_id: str) -> Optional[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Failed to get result for comparison {comparison_id}: {e}")
         return None
+
+def update_task_status(comparison_id: str, status: str) -> None:
+    """更新任务状态"""
+    _task_status[comparison_id] = {
+        "status": status,
+        "updated_at": datetime.now().isoformat()
+    }
+    logger.info(f"Updated task {comparison_id} status to {status}")
+
+def get_task_status(comparison_id: str) -> str:
+    """获取任务状态"""
+    if comparison_id in _task_status:
+        return _task_status[comparison_id]["status"]
+    return "not_found"
+
+def update_task_progress(comparison_id: str, progress: int, current_step: str = "", estimated_time: str = "") -> None:
+    """更新任务进度"""
+    if comparison_id not in _task_progress:
+        _task_progress[comparison_id] = {
+            "started_at": datetime.now().isoformat()
+        }
+    
+    _task_progress[comparison_id].update({
+        "progress": progress,
+        "current_step": current_step,
+        "estimated_time": estimated_time,
+        "updated_at": datetime.now().isoformat()
+    })
+
+def get_task_progress(comparison_id: str) -> Dict[str, Any]:
+    """获取任务进度"""
+    return _task_progress.get(comparison_id, {})
+
+def create_task(comparison_id: str) -> None:
+    """创建新任务"""
+    update_task_status(comparison_id, "pending")
+
+
+def create_error_response(
+    status_code: int,
+    error_code: str,
+    message: str,
+    details: Optional[Dict[str, Any]] = None
+) -> HTTPException:
+    """创建标准化的错误响应"""
+    error_detail = {
+        "code": error_code,
+        "message": message
+    }
+    if details:
+        error_detail["details"] = details
+    
+    return HTTPException(
+        status_code=status_code,
+        detail=error_detail
+    )
+
+
+def create_success_response(data: Dict[str, Any], message: Optional[str] = None) -> Dict[str, Any]:
+    """创建标准化的成功响应"""
+    response = {
+        "success": True,
+        "data": data,
+        "timestamp": datetime.utcnow().isoformat()
+    }
+    if message:
+        response["message"] = message
+    return response

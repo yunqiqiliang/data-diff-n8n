@@ -6,8 +6,16 @@ import {
 	NodeConnectionType,
 } from 'n8n-workflow';
 import fetch from 'node-fetch';
+import { ensureSerializable } from '../utils/serialization';
 
 export class DatabaseConnector implements INodeType {
+	// 辅助方法：安全地添加数据到返回数组
+	private static pushSafeData(returnData: INodeExecutionData[], data: any): void {
+		const cleanedData = ensureSerializable(data);
+		returnData.push({
+			json: cleanedData,
+		});
+	}
 	description: INodeTypeDescription = {
 		displayName: 'Database Connector',
 		name: 'databaseConnector',
@@ -57,6 +65,12 @@ export class DatabaseConnector implements INodeType {
 						description: 'Execute custom SQL query',
 						action: 'Execute custom SQL query',
 					},
+					{
+						name: 'Prepare for Comparison',
+						value: 'prepareComparison',
+						description: 'Get connection info and tables for data comparison',
+						action: 'Prepare database for comparison',
+					},
 				],
 				default: 'testConnection',
 			},
@@ -69,7 +83,7 @@ export class DatabaseConnector implements INodeType {
 				description: 'Name of the schema to query (optional, overrides credential schema)',
 				displayOptions: {
 					show: {
-						operation: ['getSchema', 'listTables'],
+						operation: ['getSchema', 'listTables', 'prepareComparison'],
 					},
 				},
 			},
@@ -101,6 +115,44 @@ export class DatabaseConnector implements INodeType {
 					},
 				},
 			},
+			{
+				displayName: 'Include Sample Data',
+				name: 'includeSampleData',
+				type: 'boolean',
+				default: false,
+				description: 'Include sample rows from each table',
+				displayOptions: {
+					show: {
+						operation: ['prepareComparison'],
+					},
+				},
+			},
+			{
+				displayName: 'Sample Size',
+				name: 'sampleSize',
+				type: 'number',
+				default: 5,
+				description: 'Number of sample rows to include per table',
+				displayOptions: {
+					show: {
+						operation: ['prepareComparison'],
+						includeSampleData: [true],
+					},
+				},
+			},
+			{
+				displayName: 'Table Filter',
+				name: 'tableFilter',
+				type: 'string',
+				default: '',
+				placeholder: 'e.g., user%, order_*',
+				description: 'Filter tables by pattern (SQL LIKE syntax)',
+				displayOptions: {
+					show: {
+						operation: ['prepareComparison'],
+					},
+				},
+			},
 		],
 	};
 
@@ -110,10 +162,11 @@ export class DatabaseConnector implements INodeType {
 		const operation = this.getNodeParameter('operation', 0) as string;
 
 		for (let i = 0; i < items.length; i++) {
+			let connectionConfig: any = null;
 			try {
 				// 从凭证获取连接配置
 				const credentials = await this.getCredentials('databaseConnectorCredentials', i);
-				const connectionConfig = DatabaseConnector.buildConnectionConfig(credentials, this, i);
+				connectionConfig = DatabaseConnector.buildConnectionConfig(credentials, this, i);
 				let result: any = {};
 
 				switch (operation) {
@@ -121,16 +174,14 @@ export class DatabaseConnector implements INodeType {
 						result = await DatabaseConnector.testConnectionMethod(connectionConfig);
 						// 生成连接 URL 供下游节点使用
 						const connectionUrl = DatabaseConnector.buildConnectionUrl(connectionConfig);
-						returnData.push({
-							json: {
-								operation,
-								databaseType: connectionConfig.type,
-								success: true,
-								connectionUrl,
-								connectionConfig: connectionConfig,
-								data: result,
-								timestamp: new Date().toISOString(),
-							},
+						DatabaseConnector.pushSafeData(returnData, {
+							operation,
+							databaseType: connectionConfig.type,
+							success: true,
+							connectionUrl,
+							connectionConfig: connectionConfig,
+							data: result,
+							timestamp: new Date().toISOString(),
 						});
 						break;
 					case 'getSchema':
@@ -161,6 +212,55 @@ export class DatabaseConnector implements INodeType {
 								timestamp: new Date().toISOString(),
 							},
 						});
+						break;
+					case 'prepareComparison':
+						// 使用默认值避免参数错误
+						const schemaForComparison = this.getNodeParameter('schemaName', i, '') as string;
+						const includeSampleData = this.getNodeParameter('includeSampleData', i, false) as boolean;
+						const sampleSize = this.getNodeParameter('sampleSize', i, 5) as number;
+						const tableFilter = this.getNodeParameter('tableFilter', i, '') as string;
+						
+						// 获取连接信息和表列表
+						result = await DatabaseConnector.prepareForComparisonMethod(
+							connectionConfig,
+							schemaForComparison,
+							includeSampleData,
+							sampleSize,
+							tableFilter
+						);
+						
+						// 生成比对专用的输出格式
+						const comparisonData = {
+							operation,
+							databaseType: connectionConfig.type,
+							success: true,
+							connectionUrl: DatabaseConnector.buildConnectionUrl(connectionConfig),
+							connectionConfig: connectionConfig,
+							tables: result.tables || [],
+							schema: schemaForComparison || connectionConfig.schema,
+							statistics: result.statistics || {},
+							sampleData: result.sampleData || {},
+							metadata: {
+								totalTables: result.tables?.length || 0,
+								includedSampleData: includeSampleData,
+								preparedAt: new Date().toISOString(),
+							},
+							// 为数据比对节点准备的特殊字段
+							comparisonReady: true,
+							comparisonConfig: {
+								// 避免循环引用，创建新对象
+								source_config: { ...connectionConfig },
+								// 深拷贝表数组，避免循环引用
+								available_tables: (result.tables || []).map((table: any) => ({
+									name: table.name,
+									value: table.value,
+									description: table.description
+								})),
+								database_type: connectionConfig.type,
+							},
+						};
+						
+						DatabaseConnector.pushSafeData(returnData, comparisonData);
 						break;
 					case 'executeQuery':
 						const sqlQuery = this.getNodeParameter('sqlQuery', i) as string;
@@ -219,14 +319,34 @@ export class DatabaseConnector implements INodeType {
 				}
 
 			} catch (error: any) {
+				// 提供更详细的错误信息
+				const errorData: any = {
+					operation,
+					databaseType: connectionConfig?.type || 'unknown',
+					success: false,
+					error: error?.message || 'Unknown error',
+					timestamp: new Date().toISOString(),
+				};
+				
+				// 如果是凭据错误，添加提示
+				if (error?.message?.includes('Could not get parameter') || error?.message?.includes('credentials')) {
+					errorData.hint = 'Please ensure database credentials are properly configured';
+					errorData.errorType = 'credentials';
+					errorData.credentialName = 'databaseConnectorCredentials';
+				}
+				
+				// 如果是连接错误，添加调试信息
+				if (connectionConfig) {
+					errorData.attemptedConnection = {
+						type: connectionConfig.type,
+						host: connectionConfig.host,
+						database: connectionConfig.database,
+						schema: connectionConfig.schema,
+					};
+				}
+				
 				returnData.push({
-					json: {
-						operation,
-						databaseType: 'unknown',
-						success: false,
-						error: error?.message || 'Unknown error',
-						timestamp: new Date().toISOString(),
-					},
+					json: ensureSerializable(errorData),
 				});
 			}
 		}
@@ -521,6 +641,115 @@ export class DatabaseConnector implements INodeType {
 		} catch (error) {
 			console.error('Error formatting tables for selection:', error);
 			return [];
+		}
+	}
+
+	private static async prepareForComparisonMethod(
+		config: any,
+		schema: string,
+		includeSampleData: boolean,
+		sampleSize: number,
+		tableFilter: string
+	): Promise<any> {
+		try {
+			// 1. 首先获取表列表
+			const tablesResult = await DatabaseConnector.listTablesMethod(config, schema);
+			let tables = DatabaseConnector.formatTablesForSelection(tablesResult, config);
+			
+			// 2. 应用表过滤器
+			if (tableFilter) {
+				const filterPattern = tableFilter.replace(/%/g, '.*').replace(/_/g, '.');
+				const filterRegex = new RegExp(filterPattern, 'i');
+				tables = tables.filter(table => filterRegex.test(table.name));
+			}
+			
+			// 3. 获取数据库统计信息
+			const statistics: any = {
+				totalTables: tables.length,
+				schema: schema || config.schema || 'default',
+				databaseType: config.type,
+			};
+			
+			// 4. 如果需要，获取示例数据
+			let sampleData: any = {};
+			if (includeSampleData && tables.length > 0) {
+				// 限制采样的表数量，避免性能问题
+				const tablesToSample = tables.slice(0, 10);
+				
+				for (const table of tablesToSample) {
+					try {
+						const query = `SELECT * FROM ${table.value} LIMIT ${sampleSize}`;
+						const queryResult = await DatabaseConnector.executeQueryMethod(config, query);
+						
+						if (queryResult && queryResult.rows) {
+							sampleData[table.value] = {
+								rows: queryResult.rows,
+								rowCount: queryResult.rows.length,
+								columns: queryResult.rows.length > 0 ? Object.keys(queryResult.rows[0]) : [],
+							};
+						}
+					} catch (error) {
+						// 如果单个表查询失败，继续处理其他表
+						console.warn(`Failed to get sample data for ${table.value}:`, error);
+						sampleData[table.value] = {
+							error: 'Failed to retrieve sample data',
+							rowCount: 0,
+							columns: [],
+						};
+					}
+				}
+			}
+			
+			// 5. 获取额外的元数据
+			try {
+				// 可以添加更多元数据查询，如：
+				// - 数据库版本
+				// - 表大小估算
+				// - 索引信息等
+				const versionQuery = DatabaseConnector.getVersionQuery(config.type);
+				if (versionQuery) {
+					const versionResult = await DatabaseConnector.executeQueryMethod(config, versionQuery);
+					statistics.databaseVersion = DatabaseConnector.extractVersion(versionResult, config.type);
+				}
+			} catch (error) {
+				// 元数据查询失败不应该影响主要功能
+				console.warn('Failed to get additional metadata:', error);
+			}
+			
+			return {
+				tables,
+				statistics,
+				sampleData,
+				connectionValid: true,
+				preparedAt: new Date().toISOString(),
+			};
+		} catch (error: any) {
+			throw new Error(`Failed to prepare for comparison: ${error.message}`);
+		}
+	}
+	
+	private static getVersionQuery(dbType: string): string | null {
+		const versionQueries: { [key: string]: string } = {
+			mysql: 'SELECT VERSION() as version',
+			postgresql: 'SELECT version() as version',
+			postgres: 'SELECT version() as version',
+			clickzetta: 'SELECT version() as version',
+			sqlserver: 'SELECT @@VERSION as version',
+			mssql: 'SELECT @@VERSION as version',
+		};
+		
+		return versionQueries[dbType.toLowerCase()] || null;
+	}
+	
+	private static extractVersion(result: any, dbType: string): string {
+		try {
+			if (result && result.rows && result.rows.length > 0) {
+				const row = result.rows[0];
+				return row.version || row.VERSION || row.Version || 'Unknown';
+			}
+			return 'Unknown';
+		} catch (error) {
+			return 'Unknown';
 		}
 	}
 }

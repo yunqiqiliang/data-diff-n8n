@@ -2,6 +2,9 @@
 	"folders": [
 		{
 			"path": "."
+		},
+		{
+			"path": "../../../yunqidoc/cn_markdown_20250526"
 		}
 	]
 }

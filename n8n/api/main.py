@@ -15,7 +15,12 @@ import uuid
 from urllib.parse import urlparse, parse_qs
 from json import JSONDecodeError
 
-from .utils import parse_connection_string
+from .utils import parse_connection_string, create_error_response, create_success_response
+from .response_models import (
+    ErrorCodes, BaseResponse, ConnectionTestResponse, ComparisonStartResponse,
+    ComparisonResultResponse, TableListResponse, QueryExecutionResponse,
+    HealthCheckResponse, ErrorResponse, DataResponse
+)
 try:
     from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
     PROMETHEUS_AVAILABLE = True
@@ -28,10 +33,8 @@ from ..core import (
     ClickzettaAdapter,
     ResultProcessor,
     ConfigManager,
-    ErrorHandler,
-    WorkflowScheduler
+    ErrorHandler
 )
-from ..workflows import TemplateManager, WorkflowBuilder
 from .advanced_routes import router as advanced_router
 
 # 配置日志
@@ -71,9 +74,6 @@ config_manager = ConfigManager()
 connection_manager = ConnectionManager(config_manager)
 comparison_engine = ComparisonEngine(config_manager)
 result_processor = ResultProcessor(config_manager)
-workflow_builder = WorkflowBuilder(config_manager)
-scheduler = WorkflowScheduler(config_manager)
-template_manager = TemplateManager()
 error_handler = ErrorHandler(config_manager)
 
 
@@ -103,17 +103,21 @@ class TableComparisonRequest(BaseModel):
     columns_to_compare: Optional[List[str]] = None
     operation_type: str = "compareTables"
     sample_size: Optional[int] = 10000
-    bisection_threshold: Optional[int] = 1024
+    # 算法选择
+    algorithm: Optional[str] = Field("auto", description="比对算法: auto/joindiff/hashdiff")
+    # 分段比对参数
+    bisection_factor: Optional[int] = Field(None, description="每次迭代的段数，默认32")
+    bisection_threshold: Optional[int] = Field(None, description="最小分段阈值，默认16384")
+    # 采样参数
+    sampling_confidence: Optional[float] = Field(0.95, description="采样置信水平，默认0.95")
+    sampling_tolerance: Optional[float] = Field(0.01, description="采样误差容限，默认0.01")
+    auto_sample_threshold: Optional[int] = Field(100000, description="自动采样阈值，默认100000")
+    enable_sampling: Optional[bool] = Field(True, description="是否启用智能采样")
     case_sensitive: Optional[bool] = True
     threads: Optional[int] = 1
     strict_type_checking: Optional[bool] = False
 
 
-class SchemaComparisonRequest(BaseModel):
-    """模式比对请求模型"""
-    source_connection: str
-    target_connection: str
-    operation_type: str = "compareSchemas"
 
 
 class DatabaseConfig(BaseModel):
@@ -151,21 +155,6 @@ class ComparisonRequest(BaseModel):
     async_mode: Optional[bool] = Field(False, description="是否异步执行")
 
 
-class WorkflowConfig(BaseModel):
-    """工作流配置模型"""
-    name: str = Field(..., description="工作流名称")
-    description: Optional[str] = Field("", description="工作流描述")
-    template: Optional[str] = Field("simple_comparison", description="模板名称")
-    schedule: Optional[str] = Field(None, description="调度表达式")
-    enabled: Optional[bool] = Field(True, description="是否启用")
-
-
-class ScheduleConfig(BaseModel):
-    """调度配置模型"""
-    type: str = Field("cron", description="调度类型")
-    expression: str = Field(..., description="调度表达式")
-    timezone: Optional[str] = Field("UTC", description="时区")
-    enabled: Optional[bool] = Field(True, description="是否启用")
 
 
 # 新增：支持嵌套JSON结构的比对请求模型
@@ -233,52 +222,49 @@ class QueryExecutionRequest(BaseModel):
 
 # API 端点实现
 
-@app.get("/")
+@app.get("/", response_model=BaseResponse)
 async def root():
     """根端点"""
-    return {
-        "message": "Data-Diff N8N API",
-        "version": "1.0.0",
-        "status": "running",
-        "timestamp": datetime.utcnow().isoformat()
-    }
+    return create_success_response(
+        data={
+            "name": "Data-Diff N8N API",
+            "version": "1.0.0",
+            "status": "running"
+        },
+        message="API is running"
+    )
 
 
-@app.get("/health")
+@app.get("/health", response_model=HealthCheckResponse)
 async def health_check():
     """健康检查端点"""
     try:
         # 检查各个组件状态
-        health_status = {
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat(),
-            "components": {
-                "config_manager": "ok",
-                "connection_manager": "ok",
-                "comparison_engine": "ok",
-                "result_processor": "ok",
-                "workflow_builder": "ok",
-                "scheduler": "ok"
-            }
+        components = {
+            "config_manager": {"status": "healthy"},
+            "connection_manager": {"status": "healthy"},
+            "comparison_engine": {"status": "healthy"},
+            "result_processor": {"status": "healthy"},
+            "error_handler": {"status": "healthy"}
         }
 
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content=health_status
+        return HealthCheckResponse(
+            success=True,
+            status="healthy",
+            version="1.0.0",
+            components=components
         )
     except Exception as e:
         logger.error(f"Health check failed: {e}")
-        return JSONResponse(
+        raise create_error_response(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            content={
-                "status": "unhealthy",
-                "error": str(e),
-                "timestamp": datetime.utcnow().isoformat()
-            }
+            error_code=ErrorCodes.INTERNAL_ERROR,
+            message="Health check failed",
+            details={"error": str(e)}
         )
 
 
-@app.post("/api/v1/connections/test")
+@app.post("/api/v1/connections/test", response_model=ConnectionTestResponse)
 async def test_connection(db_config: dict):
     """测试数据库连接，支持多种数据库类型（扁平参数）"""
     db_type = db_config.get("type") or db_config.get("driver")
@@ -312,9 +298,11 @@ async def test_connection(db_config: dict):
                 conn.close()
             except ImportError as ie:
                 if "runtime_version" in str(ie):
-                    raise HTTPException(
-                        status_code=500,
-                        detail="ClickZetta连接器与protobuf版本不兼容。请检查依赖版本。"
+                    raise create_error_response(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        error_code=ErrorCodes.CONNECTION_ERROR,
+                        message="ClickZetta connector incompatible with protobuf version",
+                        details={"error": "Please check dependency versions"}
                     )
                 raise
         elif db_type == "postgres":
@@ -388,14 +376,26 @@ async def test_connection(db_config: dict):
             cursor.close()
             conn.close()
         else:
-            raise HTTPException(status_code=400, detail=f"不支持的数据库类型: {db_type}")
+            raise create_error_response(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code=ErrorCodes.UNSUPPORTED_DATABASE,
+                message=f"Unsupported database type: {db_type}"
+            )
 
-        return {"success": True, "message": f"{db_type} 连接测试成功"}
+        return ConnectionTestResponse(
+            success=True,
+            database_type=db_type,
+            message=f"{db_type} connection test successful"
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"{db_type} connection test failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"{db_type} 连接测试失败: {str(e)}"
+        raise create_error_response(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            error_code=ErrorCodes.CONNECTION_ERROR,
+            message=f"{db_type} connection test failed",
+            details={"error": str(e)}
         )
 
 
@@ -449,77 +449,144 @@ async def create_comparison(
         )
 
 
-@app.get("/api/v1/comparisons/{comparison_id}")
-async def get_comparison_result(comparison_id: str):
-    """获取比对结果"""
+
+
+@app.get("/api/v1/compare/status")
+async def get_all_comparisons_status():
+    """获取所有比对任务的状态概览"""
     try:
-        # 从缓存或存储中获取结果
-        from .utils import get_result_from_storage
-        result = get_result_from_storage(comparison_id)
-
-        if result:
-            return {
-                "comparison_id": comparison_id,
-                "status": "completed",
-                "result": result
-            }
-        else:
-            # 检查是否在活跃任务中
-            if comparison_engine and hasattr(comparison_engine, 'active_comparisons'):
-                active_job = comparison_engine.active_comparisons.get(comparison_id)
-                if active_job:
-                    return {
-                        "comparison_id": comparison_id,
-                        "status": active_job.get("status", "running"),
-                        "message": "比对任务正在进行中"
-                    }
-
-            return {
-                "comparison_id": comparison_id,
-                "status": "not_found",
-                "message": "比对结果未找到或仍在处理中"
-            }
-
-    except Exception as e:
-        logger.error(f"Failed to get comparison result: {e}", exc_info=True)
-        # 提供详细的错误信息，包括异常类型和traceback
-        import traceback
-        error_details = {
-            "error_type": type(e).__name__,
-            "error_message": str(e),
-            "traceback": traceback.format_exc() if logger.isEnabledFor(logging.DEBUG) else None
+        from .utils import _task_status, _task_progress
+        
+        # 汇总任务状态
+        status_summary = {
+            "total": len(_task_status),
+            "pending": sum(1 for t in _task_status.values() if t["status"] == "pending"),
+            "running": sum(1 for t in _task_status.values() if t["status"] == "running"),
+            "completed": sum(1 for t in _task_status.values() if t["status"] == "completed"),
+            "failed": sum(1 for t in _task_status.values() if t["status"] == "failed")
         }
-
+        
+        # 获取最近10个任务的详细信息
+        recent_tasks = []
+        sorted_tasks = sorted(_task_status.items(), 
+                            key=lambda x: x[1]["updated_at"], 
+                            reverse=True)[:10]
+        
+        for task_id, task_info in sorted_tasks:
+            progress_info = _task_progress.get(task_id, {})
+            recent_tasks.append({
+                "comparison_id": task_id,
+                "status": task_info["status"],
+                "updated_at": task_info["updated_at"],
+                "progress": progress_info.get("progress", 0),
+                "current_step": progress_info.get("current_step", "")
+            })
+        
         return {
-            "comparison_id": comparison_id,
-            "status": "error",
-            "message": f"获取比对结果失败: {str(e)}",
-            "error_message": str(e),
-            "error_details": error_details
+            "summary": status_summary,
+            "recent_tasks": recent_tasks,
+            "timestamp": datetime.utcnow().isoformat()
         }
+        
+    except Exception as e:
+        logger.error(f"获取任务状态概览失败: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"获取任务状态概览失败: {str(e)}"
+        )
 
 
-@app.get("/api/v1/compare/results/{comparison_id}")
+@app.get("/api/v1/compare/results/{comparison_id}", response_model=ComparisonResultResponse)
 async def get_comparison_result(comparison_id: str):
-    """获取比对结果"""
+    """获取比对结果
+    
+    返回状态可能为：
+    - pending: 任务已创建但尚未开始
+    - running: 任务正在执行中
+    - completed: 任务已完成
+    - failed: 任务执行失败
+    - not_found: 任务不存在
+    """
     try:
-        from .utils import get_result_from_storage
-        result = get_result_from_storage(comparison_id)
-
-        if result is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"未找到比对任务 {comparison_id} 的结果"
+        from .utils import get_result_from_storage, get_task_status, get_task_progress
+        
+        # 先检查任务状态
+        task_status = get_task_status(comparison_id)
+        
+        if task_status == "not_found":
+            # 查看是否有已保存的结果
+            result = get_result_from_storage(comparison_id)
+            if result is None:
+                raise create_error_response(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    error_code=ErrorCodes.TASK_NOT_FOUND,
+                    message=f"Comparison task not found: {comparison_id}",
+                    details={"comparison_id": comparison_id}
+                )
+            # 返回已保存的结果，确保格式正确
+            return ComparisonResultResponse(
+                success=True,
+                comparison_id=comparison_id,
+                status=result.get("status", "completed"),
+                result=result
             )
-
-        return result
+        
+        elif task_status == "pending":
+            return ComparisonResultResponse(
+                success=True,
+                comparison_id=comparison_id,
+                status="pending",
+                message="Task created, waiting for execution",
+                progress=0,
+                estimated_time="Unknown"
+            )
+        
+        elif task_status == "running":
+            # 获取进度信息（如果有）
+            progress_info = get_task_progress(comparison_id)
+            return ComparisonResultResponse(
+                success=True,
+                comparison_id=comparison_id,
+                status="running",
+                message="Task is running",
+                progress=progress_info.get("progress", 0),
+                current_step=progress_info.get("current_step", "Data comparison"),
+                estimated_time=progress_info.get("estimated_time", "Calculating...")
+            )
+        
+        else:
+            # 获取已完成或失败的结果
+            result = get_result_from_storage(comparison_id)
+            if result is None:
+                # 如果状态显示完成但没有结果，返回错误
+                return ComparisonResultResponse(
+                    success=False,
+                    comparison_id=comparison_id,
+                    status="error",
+                    message="Task completed but result is missing"
+                )
+            
+            # 返回结果
+            return ComparisonResultResponse(
+                success=task_status != "failed",
+                comparison_id=comparison_id,
+                status=task_status,
+                result=result,
+                message="Task completed successfully" if task_status == "completed" else "Task failed"
+            )
+    
     except HTTPException as he:
         raise
     except Exception as e:
-        logger.error(f"获取比对结果失败: {e}")
-        raise HTTPException(
+        logger.error(f"Failed to get comparison result: {e}")
+        raise create_error_response(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取比对结果失败: {str(e)}"
+            error_code=ErrorCodes.INTERNAL_ERROR,
+            message="Failed to get comparison result",
+            details={
+                "comparison_id": comparison_id,
+                "error": str(e)
+            }
         )
 
 
@@ -600,18 +667,20 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
             params['key_columns'] = params['key_columns[]']  # 转换为标准名称
 
         if not key_param:
-            raise HTTPException(
+            raise create_error_response(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="请求参数无效：缺少必要参数 key_columns, 或对应的数组格式"
+                error_code=ErrorCodes.MISSING_PARAMETER,
+                message="Missing required parameter: key_columns or primary_key_columns"
             )
 
         # 检查其他必要参数
         required_params = ['source_connection', 'target_connection', 'source_table', 'target_table']
         for param in required_params:
             if param not in params or not params[param]:
-                raise HTTPException(
+                raise create_error_response(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                    detail=f"请求参数无效：缺少必要参数 {param}"
+                    error_code=ErrorCodes.MISSING_PARAMETER,
+                    message=f"Missing required parameter: {param}"
                 )
 
         # 处理特殊参数 - 确保主键列不为空，使用统一的 key_columns 参数
@@ -627,9 +696,10 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
             primary_keys = []
 
         if not primary_keys:
-            raise HTTPException(
+            raise create_error_response(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="请求参数无效：key_columns 不能为空"
+                error_code=ErrorCodes.INVALID_PARAMETER,
+                message="key_columns cannot be empty"
             )
 
         update_keys = params.get('update_key_columns', '').split(',') if isinstance(params.get('update_key_columns'), str) and params.get('update_key_columns').strip() else []
@@ -653,10 +723,12 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
             source_db_config = parse_connection_string(params['source_connection'])
             target_db_config = parse_connection_string(params['target_connection'])
         except Exception as e:
-            logger.error(f"解析连接字符串失败: {e}", exc_info=True)
-            raise HTTPException(
+            logger.error(f"Failed to parse connection string: {e}", exc_info=True)
+            raise create_error_response(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"解析数据库连接字符串失败: {str(e)}"
+                error_code=ErrorCodes.INVALID_PARAMETER,
+                message="Failed to parse database connection string",
+                details={"error": str(e)}
             )
 
         # 构建比对配置
@@ -699,12 +771,20 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
             "update_column": update_keys[0] if update_keys else None,
             "source_filter": params.get('where_condition'),
             "target_filter": params.get('where_condition'),
-            "algorithm": params.get('operation_type', 'compareTables').lower(),
+            "algorithm": params.get('algorithm', 'auto'),  # 使用新的算法参数
             "sample_size": sample_size,
             "threads": threads,
             "case_sensitive": case_sensitive,
             "enable_sampling": sample_size is not None,
-            "strict_type_checking": strict_type_checking
+            "strict_type_checking": strict_type_checking,
+            # 添加分段比对参数
+            "bisection_factor": params.get('bisection_factor'),
+            "bisection_threshold": params.get('bisection_threshold'),
+            # 添加采样参数
+            "sampling_confidence": float(params.get('sampling_confidence', 0.95)),
+            "sampling_tolerance": float(params.get('sampling_tolerance', 0.01)),
+            "auto_sample_threshold": int(params.get('auto_sample_threshold', 100000)),
+            "enable_sampling": params.get('enable_sampling', True) if isinstance(params.get('enable_sampling'), bool) else str(params.get('enable_sampling', 'true')).lower() == 'true'
         }
 
         logger.info(f"比对配置: {comparison_config}")
@@ -712,6 +792,10 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
         # 生成比对ID
         comparison_id = str(uuid.uuid4())
         logger.info(f"创建比对任务 {comparison_id}")
+        
+        # 创建任务记录
+        from .utils import create_task
+        create_task(comparison_id)
 
         # 异步执行比对
         background_tasks.add_task(
@@ -722,169 +806,37 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
             comparison_config
         )
 
-        return {
-            "comparison_id": comparison_id,
-            "status": "started",
-            "message": "表比对任务已启动"
-        }
+        return ComparisonStartResponse(
+            success=True,
+            comparison_id=comparison_id,
+            status="started",
+            async_mode=True,
+            message="Table comparison task started"
+        )
 
     except HTTPException as he:
         # 直接重新抛出HTTP异常
-        logger.error(f"HTTP异常: {he}", exc_info=True)
         raise
     except ValueError as ve:
-        logger.error(f"比对请求参数错误: {ve}")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
+        logger.error(f"Comparison request parameter error: {ve}")
+        raise create_error_response(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            error_code=ErrorCodes.INVALID_PARAMETER,
+            message="Invalid comparison request parameters",
+            details={"error": str(ve)}
+        )
     except Exception as e:
-        logger.error(f"表比对失败: {e}", exc_info=True)
-        raise HTTPException(
+        logger.error(f"Table comparison failed: {e}", exc_info=True)
+        raise create_error_response(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"表比对失败: {str(e)}"
+            error_code=ErrorCodes.COMPARISON_ERROR,
+            message="Table comparison failed",
+            details={"error": str(e)}
         )
 
 
-@app.post("/api/v1/compare/schemas")
-async def compare_schemas_endpoint(request: SchemaComparisonRequest):
-    """处理模式比对请求"""
-    try:
-        source_db_config = parse_connection_string(request.source_connection)
-        target_db_config = parse_connection_string(request.target_connection)
-
-        # 假设 comparison_engine 有一个 compare_schemas 方法
-        # 如果没有，需要先在 comparison_engine.py 中实现
-        result = await comparison_engine.compare_schemas(
-            source_config=source_db_config,
-            target_config=target_db_config
-        )
-
-        return {
-            "status": "completed",
-            "result": result
-        }
-    except ValueError as ve:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(ve))
-    except Exception as e:
-        logger.error(f"Schema comparison failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"模式比对失败: {str(e)}"
-        )
 
 
-@app.get("/api/v1/templates")
-async def list_workflow_templates():
-    """获取工作流模板列表"""
-    try:
-        templates = template_manager.list_templates()
-        template_details = []
-
-        for template_name in templates:
-            template = template_manager.get_template(template_name)
-            template_details.append({
-                "name": template_name,
-                "description": template.get("description", ""),
-                "parameters": template.get("parameters", [])
-            })
-
-        return {
-            "templates": template_details,
-            "count": len(template_details)
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to list templates: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取模板列表失败: {str(e)}"
-        )
-
-
-@app.post("/api/v1/workflows")
-async def create_workflow(
-    workflow_config: WorkflowConfig,
-    source_db: DatabaseConfig,
-    target_db: DatabaseConfig,
-    comparison_config: ComparisonConfig
-):
-    """创建 N8N 工作流"""
-    try:
-        workflow_def = await workflow_builder.build_comparison_workflow(
-            name=workflow_config.name,
-            source_db=source_db.dict(by_alias=True),
-            target_db=target_db.dict(by_alias=True),
-            comparison_config=comparison_config.dict(by_alias=True),
-            schedule=workflow_config.schedule,
-            template=workflow_config.template
-        )
-
-        workflow_id = str(uuid.uuid4())
-
-        # 保存工作流定义
-        await workflow_builder.save_workflow(workflow_id, workflow_def)
-
-        return {
-            "workflow_id": workflow_id,
-            "name": workflow_config.name,
-            "status": "created",
-            "workflow_definition": workflow_def
-        }
-
-    except Exception as e:
-        logger.error(f"Workflow creation failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"工作流创建失败: {str(e)}"
-        )
-
-
-@app.post("/api/v1/workflows/{workflow_id}/schedule")
-async def schedule_workflow(
-    workflow_id: str,
-    schedule_config: ScheduleConfig
-):
-    """调度工作流"""
-    try:
-        job_info = await scheduler.schedule_workflow(
-            workflow_id=workflow_id,
-            schedule_config=schedule_config.dict(by_alias=True)
-        )
-
-        return {
-            "workflow_id": workflow_id,
-            "job_id": job_info.get("job_id"),
-            "status": "scheduled",
-            "next_run": job_info.get("next_run"),
-            "schedule": schedule_config.expression
-        }
-
-    except Exception as e:
-        logger.error(f"Workflow scheduling failed: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"工作流调度失败: {str(e)}"
-        )
-
-
-@app.get("/api/v1/workflows/{workflow_id}/status")
-async def get_workflow_status(workflow_id: str):
-    """获取工作流状态"""
-    try:
-        status_info = await scheduler.get_workflow_status(workflow_id)
-
-        return {
-            "workflow_id": workflow_id,
-            "status": status_info.get("status", "unknown"),
-            "last_run": status_info.get("last_run"),
-            "next_run": status_info.get("next_run"),
-            "run_count": status_info.get("run_count", 0)
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to get workflow status: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"获取工作流状态失败: {str(e)}"
-        )
 
 
 @app.get("/api/v1/metrics")
@@ -898,11 +850,6 @@ async def get_metrics():
                 "total": 0,  # 从存储中获取
                 "today": 0,
                 "success_rate": 0.0
-            },
-            "workflows": {
-                "total": 0,
-                "active": 0,
-                "scheduled": 0
             },
             "performance": {
                 "avg_response_time": 0.0,
@@ -941,7 +888,7 @@ async def get_recent_errors(limit: int = 50):
         )
 
 
-@app.post("/api/v1/tables/list")
+@app.post("/api/v1/tables/list", response_model=TableListResponse)
 async def list_tables(db_config: dict):
     """获取数据库表列表，支持多种数据库类型（扁平参数）"""
     db_type = db_config.get("type") or db_config.get("driver")
@@ -1069,39 +1016,58 @@ async def list_tables(db_config: dict):
             conn.close()
 
         else:
-            raise HTTPException(status_code=400, detail=f"不支持的数据库类型: {db_type}")
+            raise create_error_response(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code=ErrorCodes.UNSUPPORTED_DATABASE,
+                message=f"Unsupported database type: {db_type}"
+            )
 
-        return {
-            "success": True,
-            "tables": tables,
-            "schema": target_schema,
-            "database_type": db_type,
-            "count": len(tables)
-        }
+        return TableListResponse(
+            success=True,
+            database_type=db_type,
+            database=db_config.get("database", ""),
+            db_schema=target_schema,
+            tables=tables,
+            count=len(tables),
+            message=f"Found {len(tables)} tables"
+        )
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"{db_type} list tables failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"{db_type} 获取表列表失败: {str(e)}"
+        raise create_error_response(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            error_code=ErrorCodes.DATABASE_ERROR,
+            message=f"Failed to list tables from {db_type}",
+            details={"error": str(e)}
         )
 
 
-@app.post("/api/v1/query/execute")
+@app.post("/api/v1/query/execute", response_model=QueryExecutionResponse)
 async def execute_query(request: QueryExecutionRequest):
     """执行SQL查询"""
+    sql_query = ""
     try:
         connection_config = request.connection
         sql_query = request.query.strip()
 
         if not sql_query:
-            raise HTTPException(status_code=400, detail="SQL查询不能为空")
+            raise create_error_response(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code=ErrorCodes.INVALID_PARAMETER,
+                message="SQL query cannot be empty"
+            )
 
         # 获取数据库类型
         db_type = connection_config.get("type") or connection_config.get("database_type")
 
         if not db_type:
-            raise HTTPException(status_code=400, detail="数据库类型未指定")
+            raise create_error_response(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code=ErrorCodes.MISSING_PARAMETER,
+                message="Database type not specified"
+            )
 
         logger.info(f"Executing query on {db_type}: {sql_query[:100]}...")
 
@@ -1357,29 +1323,35 @@ async def execute_query(request: QueryExecutionRequest):
                     results = [dict(zip(columns, row)) for row in rows]
 
         else:
-            raise HTTPException(status_code=400, detail=f"不支持的数据库类型: {db_type}")
+            raise create_error_response(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                error_code=ErrorCodes.UNSUPPORTED_DATABASE,
+                message=f"Unsupported database type: {db_type}"
+            )
 
         # 应用结果限制
         if request.limit and request.limit > 0:
             results = results[:request.limit]
 
-        return {
-            "success": True,
-            "result": results,
-            "query": sql_query,
-            "database_type": db_type,
-            "row_count": len(results),
-            "timestamp": datetime.utcnow().isoformat()
-        }
+        return QueryExecutionResponse(
+            success=True,
+            query=sql_query,
+            database_type=db_type,
+            row_count=len(results),
+            result=results,
+            message=f"Query executed successfully, returned {len(results)} rows"
+        )
 
     except HTTPException as http_exc:
         # 重新抛出 HTTPException，不要包装
         raise http_exc
     except Exception as e:
         logger.error(f"Query execution failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"查询执行失败: {str(e)}"
+        raise create_error_response(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            error_code=ErrorCodes.DATABASE_ERROR,
+            message="Query execution failed",
+            details={"error": str(e), "query": sql_query[:100] + "..." if len(sql_query) > 100 else sql_query}
         )
 
 
@@ -1392,8 +1364,14 @@ async def execute_comparison_async(
 ):
     """异步执行比对任务"""
     try:
+        from .utils import save_result_to_storage, update_task_status, update_task_progress
+        
         global comparison_engine
         logger.info(f"Starting async comparison {comparison_id}")
+        
+        # 更新任务状态为运行中
+        update_task_status(comparison_id, "running")
+        update_task_progress(comparison_id, 10, "初始化连接")
 
         result = await comparison_engine.compare_tables(
             source_config=source_config,
@@ -1442,7 +1420,6 @@ async def startup_event():
     # 初始化各个组件
     await config_manager.initialize()
     await connection_manager.initialize()
-    await scheduler.initialize()
 
     logger.info("Data-Diff N8N API started successfully")
 
@@ -1455,7 +1432,6 @@ async def shutdown_event():
 
     # 清理资源
     await connection_manager.cleanup()
-    await scheduler.shutdown()
 
     logger.info("Data-Diff N8N API shutdown complete")
 
@@ -1463,12 +1439,6 @@ async def shutdown_event():
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-@app.post("/api/v1/compare/tables/query", response_model=Dict[str, Any])
-@app.get("/api/v1/compare/tables/query", response_model=Dict[str, Any])
-async def compare_tables_query_endpoint(request: Request, background_tasks: BackgroundTasks):
-    """处理表比对查询请求 - 专为 n8n 适配的路由"""
-    # 直接调用主要端点的处理逻辑
-    return await compare_tables_endpoint(request, background_tasks)
 
 
 @app.post("/api/v1/compare/tables/nested", response_model=Dict[str, Any])
@@ -1555,6 +1525,10 @@ async def compare_tables_nested_endpoint(request: NestedComparisonRequest, backg
         # 生成比对ID
         comparison_id = str(uuid.uuid4())
         logger.info(f"创建嵌套结构比对任务 {comparison_id}")
+        
+        # 创建任务记录
+        from .utils import create_task
+        create_task(comparison_id)
 
         # 异步执行比对
         background_tasks.add_task(

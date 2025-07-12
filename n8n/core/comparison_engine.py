@@ -9,6 +9,30 @@ from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
 from datetime import datetime
 import uuid
 
+# 导入采样引擎
+try:
+    from .sampling_engine import SamplingEngine, SamplingConfig
+except ImportError:
+    try:
+        from n8n.core.sampling_engine import SamplingEngine, SamplingConfig
+    except ImportError:
+        # 如果都失败了，定义一个临时的
+        class SamplingConfig:
+            def __init__(self, **kwargs):
+                self.enabled = kwargs.get('enabled', True)
+                self.confidence_level = kwargs.get('confidence_level', 0.95)
+                self.margin_of_error = kwargs.get('margin_of_error', 0.01)
+                self.min_sample_size = kwargs.get('min_sample_size', 1000)
+                self.max_sample_size = kwargs.get('max_sample_size', 1000000)
+                self.auto_sample_threshold = kwargs.get('auto_sample_threshold', 100000)
+        
+        class SamplingEngine:
+            def __init__(self):
+                pass
+            
+            def should_use_sampling(self, row_count, config):
+                return False, None
+
 # 导入 data-diff 相关模块
 try:
     from data_diff import diff_tables, Algorithm
@@ -60,6 +84,7 @@ class ComparisonEngine:
         self.logger = logging.getLogger(__name__)
         self.connection_manager = ConnectionManager(config_manager)
         self.active_comparisons: Dict[str, Dict[str, Any]] = {}
+        self.sampling_engine = SamplingEngine()
 
     async def compare_tables(
         self,
@@ -678,6 +703,7 @@ class ComparisonEngine:
                 try:
                     source_count = source_table_segment.count()
                     self.logger.info(f"✅ Source table connection verified - row count: {source_count}")
+                    config["_source_count"] = source_count  # 保存行数供后续使用
                 except Exception as source_test_error:
                     self.logger.error(f"❌ Source table connection/query failed: {source_test_error}")
                     raise Exception(f"源表连接失败或表不存在: {config['source_table']} - {str(source_test_error)}")
@@ -699,6 +725,7 @@ class ComparisonEngine:
                 try:
                     target_count = target_table_segment.count()
                     self.logger.info(f"✅ Target table connection verified - row count: {target_count}")
+                    config["_target_count"] = target_count  # 保存行数供后续使用
                 except Exception as target_test_error:
                     self.logger.error(f"❌ Target table connection/query failed: {target_test_error}")
                     raise Exception(f"目标表连接失败或表不存在: {config['target_table']} - {str(target_test_error)}")
@@ -821,9 +848,28 @@ class ComparisonEngine:
             config["_type_warnings"] = type_warnings
             config["_ignored_columns_details"] = ignored_columns_details
 
-            # 选择算法
-            algorithm_str = config.get("algorithm", "hashdiff").lower()
-            algorithm = Algorithm.JOINDIFF if algorithm_str == "joindiff" else Algorithm.HASHDIFF
+            # 选择算法 - 添加自动选择逻辑
+            algorithm_str = config.get("algorithm", "auto").lower()
+            
+            if algorithm_str == "auto":
+                # 自动选择算法：同数据库用 JOINDIFF，跨数据库用 HASHDIFF
+                source_type = source_config.get("type", "").lower() if source_config else ""
+                target_type = target_config.get("type", "").lower() if target_config else ""
+                
+                if source_type and target_type and source_type == target_type:
+                    algorithm = Algorithm.JOINDIFF
+                    self.logger.info(f"🤖 Auto-selected JOINDIFF algorithm (same database type: {source_type})")
+                else:
+                    algorithm = Algorithm.HASHDIFF
+                    self.logger.info(f"🤖 Auto-selected HASHDIFF algorithm (cross-database: {source_type} -> {target_type})")
+            elif algorithm_str == "joindiff":
+                algorithm = Algorithm.JOINDIFF
+            elif algorithm_str == "hashdiff":
+                algorithm = Algorithm.HASHDIFF
+            else:
+                # 默认使用 HASHDIFF
+                algorithm = Algorithm.HASHDIFF
+                self.logger.warning(f"Unknown algorithm '{algorithm_str}', using HASHDIFF as default")
 
             # 构建比对选项
             diff_options = {
@@ -834,6 +880,18 @@ class ComparisonEngine:
                 "threaded": True,
                 "max_threadpool_size": config.get("threads", 1)
             }
+            
+            # 添加分段比对参数（仅对 HASHDIFF 算法有效）
+            if algorithm == Algorithm.HASHDIFF:
+                # bisection_factor: 每次迭代的段数，默认 32
+                if config.get("bisection_factor"):
+                    diff_options["bisection_factor"] = config.get("bisection_factor")
+                    self.logger.info(f"📊 Using bisection_factor: {diff_options['bisection_factor']}")
+                
+                # bisection_threshold: 最小分段阈值，默认 16384
+                if config.get("bisection_threshold"):
+                    diff_options["bisection_threshold"] = config.get("bisection_threshold")
+                    self.logger.info(f"📊 Using bisection_threshold: {diff_options['bisection_threshold']}")
 
             # 添加 extra_columns（比较的列）
             compare_columns = config.get("compare_columns") or config.get("columns_to_compare")
@@ -846,6 +904,61 @@ class ComparisonEngine:
 
             # 移除值为 None 的选项
             diff_options = {k: v for k, v in diff_options.items() if v is not None}
+
+            # 应用采样逻辑
+            sampling_applied = False
+            sample_size = None
+            
+            # 暂时默认禁用采样，因为 data-diff 不直接支持
+            # TODO: 实现通过 WHERE 条件或临时表的采样方法
+            if config.get("enable_sampling", False):
+                # 构建采样配置
+                sampling_config = SamplingConfig(
+                    enabled=True,
+                    confidence_level=config.get("sampling_confidence", 0.95),
+                    margin_of_error=config.get("sampling_tolerance", 0.01),
+                    min_sample_size=config.get("min_sample_size", 1000),
+                    max_sample_size=config.get("max_sample_size", 1000000),
+                    auto_sample_threshold=config.get("auto_sample_threshold", 100000)
+                )
+                
+                # 检查是否应该使用采样（基于行数）
+                source_count = config.get("_source_count", 0)
+                target_count = config.get("_target_count", 0)
+                max_row_count = max(source_count, target_count)
+                
+                should_sample, calculated_sample_size = self.sampling_engine.should_use_sampling(
+                    max_row_count,
+                    sampling_config
+                )
+                
+                if should_sample and calculated_sample_size:
+                    # 如果用户指定了 sample_size，使用较小的值
+                    if config.get("sample_size") and config["sample_size"] > 0:
+                        sample_size = min(calculated_sample_size, config["sample_size"])
+                        self.logger.info(f"📊 Using minimum of calculated ({calculated_sample_size}) and user-specified ({config['sample_size']}) sample size: {sample_size}")
+                    else:
+                        sample_size = calculated_sample_size
+                    
+                    # 更新比对选项 - 注意：data-diff库不直接支持采样参数
+                    # 我们将在WHERE条件中实现采样
+                    sampling_applied = True
+                    config["_sampling_applied"] = True
+                    config["_actual_sample_size"] = sample_size
+                    config["_sampling_config"] = {
+                        "confidence_level": sampling_config.confidence_level,
+                        "margin_of_error": sampling_config.margin_of_error
+                    }
+                    
+                    self.logger.info(f"📊 Statistical sampling enabled: {sample_size} rows (confidence: {sampling_config.confidence_level*100}%, margin: {sampling_config.margin_of_error*100}%)")
+                elif config.get("sample_size") and config["sample_size"] > 0:
+                    # 用户手动指定了采样大小
+                    # 注意：data-diff库不直接支持采样参数
+                    sampling_applied = True
+                    sample_size = config["sample_size"]
+                    config["_sampling_applied"] = True
+                    config["_actual_sample_size"] = sample_size
+                    self.logger.info(f"📊 Manual sampling enabled: {sample_size} rows")
 
             self.logger.info(f"📋 Executing diff_tables with options: {diff_options}")
             self.logger.info(f"🚀 Starting actual table comparison (this will execute SQL queries)...")

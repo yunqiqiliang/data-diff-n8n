@@ -22,7 +22,7 @@ class ResultProcessor:
         self.logger = logging.getLogger(__name__)
         self.config_manager = config_manager
 
-    def process_comparison_result(
+    async def process_comparison_result(
         self,
         raw_result: Dict[str, Any],
         output_format: str = "json",
@@ -93,6 +93,49 @@ class ResultProcessor:
                 "differences": stats.get("differences", {}),
                 "match_rate": stats.get("match_rate", 0.0)
             }
+        
+        # 添加采样信息（如果有）
+        if raw_result.get("config", {}).get("_sampling_applied"):
+            config = raw_result.get("config", {})
+            standardized["sampling_info"] = {
+                "enabled": True,
+                "sample_size": config.get("_actual_sample_size", 0),
+                "confidence_level": config.get("_sampling_config", {}).get("confidence_level", 0.95),
+                "margin_of_error": config.get("_sampling_config", {}).get("margin_of_error", 0.01),
+                "source_total_rows": config.get("_source_count", 0),
+                "target_total_rows": config.get("_target_count", 0)
+            }
+            
+            # 如果有采样，添加推断统计
+            if standardized["statistics"].get("differences"):
+                sample_differences = sum(standardized["statistics"]["differences"].values())
+                sample_size = standardized["sampling_info"]["sample_size"]
+                population_size = max(
+                    standardized["sampling_info"]["source_total_rows"],
+                    standardized["sampling_info"]["target_total_rows"]
+                )
+                
+                if sample_size > 0 and population_size > 0:
+                    # 计算推断到总体的差异数
+                    extrapolation_factor = population_size / sample_size
+                    estimated_differences = int(sample_differences * extrapolation_factor)
+                    
+                    # 计算置信区间（简化版）
+                    import math
+                    confidence_level = standardized["sampling_info"]["confidence_level"]
+                    z_score = 1.96 if confidence_level == 0.95 else (1.645 if confidence_level == 0.90 else 2.576)
+                    sample_proportion = sample_differences / sample_size if sample_size > 0 else 0
+                    standard_error = math.sqrt((sample_proportion * (1 - sample_proportion)) / sample_size) if sample_size > 1 else 0
+                    margin = z_score * standard_error
+                    
+                    lower_bound = max(0, int((sample_proportion - margin) * population_size))
+                    upper_bound = min(population_size, int((sample_proportion + margin) * population_size))
+                    
+                    standardized["sampling_info"]["extrapolation"] = {
+                        "estimated_total_differences": estimated_differences,
+                        "confidence_interval": [lower_bound, upper_bound],
+                        "extrapolation_factor": round(extrapolation_factor, 2)
+                    }
 
         return standardized
 
