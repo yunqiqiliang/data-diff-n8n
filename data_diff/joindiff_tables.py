@@ -3,7 +3,7 @@
 from decimal import Decimal
 from functools import partial
 import logging
-from typing import List, Optional
+from typing import List, Optional, Union, Dict
 from itertools import chain
 
 import attrs
@@ -31,6 +31,10 @@ from data_diff.utils import safezip
 from data_diff.table_segment import TableSegment
 from data_diff.diff_tables import TableDiffer, DiffResult
 from data_diff.thread_utils import ThreadedYielder
+from data_diff.float_tolerance import FloatToleranceManager
+from data_diff.timestamp_precision import TimestampPrecisionManager
+from data_diff.json_comparison import JSONComparisonManager
+from data_diff.column_remapping import ColumnRemapper
 
 
 logger = logging.getLogger("joindiff_tables")
@@ -140,14 +144,70 @@ class JoinDiffer(TableDiffer):
     materialize_all_rows: bool = False
     table_write_limit: int = TABLE_WRITE_LIMIT
     skip_null_keys: bool = False
+    float_tolerance: Optional[float] = None
+    timestamp_precision: Optional[str] = None
+    json_comparison_mode: Optional[str] = None
+    column_remapping: Optional[Union[str, Dict[str, str]]] = None
+    case_sensitive_remapping: bool = True
 
     stats: dict = attrs.field(factory=dict)
+    _float_tolerance_manager: Optional[FloatToleranceManager] = attrs.field(init=False, default=None)
+    _timestamp_precision_manager: Optional[TimestampPrecisionManager] = attrs.field(init=False, default=None)
+    _json_comparison_manager: Optional[JSONComparisonManager] = attrs.field(init=False, default=None)
+    _column_remapper: Optional[ColumnRemapper] = attrs.field(init=False, default=None)
 
     def _diff_tables_root(self, table1: TableSegment, table2: TableSegment, info_tree: InfoTree) -> DiffResult:
         db = table1.database
 
         if table1.database is not table2.database:
             raise ValueError("Join-diff only works when both tables are in the same database")
+        
+        # Initialize float tolerance manager if needed
+        if self.float_tolerance is not None and self.float_tolerance > 0:
+            self._float_tolerance_manager = FloatToleranceManager(self.float_tolerance)
+            logger.info(f"Float tolerance enabled: {self.float_tolerance}")
+        
+        # Initialize timestamp precision manager if needed
+        if self.timestamp_precision:
+            self._timestamp_precision_manager = TimestampPrecisionManager(self.timestamp_precision)
+            logger.info(f"Timestamp precision enabled: {self.timestamp_precision}")
+            
+            # Check timezone compatibility
+            db1_name = table1.database.name
+            db2_name = table2.database.name
+            
+            # Log timezone warnings if any
+            if table1._schema and table2._schema:
+                for col in table1.relevant_columns:
+                    if col in table1._schema and col in table2._schema:
+                        coltype1 = table1._schema[col]
+                        coltype2 = table2._schema[col]
+                        if self._timestamp_precision_manager.should_handle_timestamp(coltype1):
+                            is_compatible, warning = self._timestamp_precision_manager.check_timezone_compatibility(
+                                db1_name, db2_name, coltype1, coltype2
+                            )
+                            if warning:
+                                logger.warning(f"Timezone compatibility warning for column '{col}': {warning}")
+        
+        # Initialize JSON comparison manager if needed
+        if self.json_comparison_mode:
+            self._json_comparison_manager = JSONComparisonManager(self.json_comparison_mode)
+            logger.info(f"JSON comparison mode enabled: {self.json_comparison_mode}")
+            
+            # Check JSON support
+            db1_name = table1.database.name
+            db2_name = table2.database.name
+            is_supported, warning = self._json_comparison_manager.validate_database_support(db1_name, db2_name)
+            if warning:
+                logger.warning(f"JSON comparison warning: {warning}")
+        
+        # Initialize column remapper if needed
+        if self.column_remapping:
+            if isinstance(self.column_remapping, str):
+                self._column_remapper = ColumnRemapper.from_string(self.column_remapping)
+            else:
+                self._column_remapper = ColumnRemapper(self.column_remapping, self.case_sensitive_remapping)
+            logger.info(f"Column remapping enabled with {len(self._column_remapper.mappings)} mappings")
 
         table1, table2 = self._threaded_call("with_schema", [table1, table2])
 
@@ -304,6 +364,30 @@ class JoinDiffer(TableDiffer):
 
         logger.debug("Done collecting stats for table #%s: %s", i, table_seg.table_path)
 
+    def _generate_tolerance_comparison(self, col1_expr, col2_expr, coltype, db):
+        """Generate SQL for float tolerance comparison"""
+        dialect = db.dialect
+        col1 = str(col1_expr)
+        col2 = str(col2_expr)
+        
+        # Generate ABS(col1 - col2) expression
+        db_name = dialect.name.lower()
+        diff = f"({col1} - {col2})"
+        abs_diff = f"ABS{diff}"
+        
+        # Handle NULL values
+        null_check = f"({col1} IS NULL OR {col2} IS NULL)"
+        
+        # Generate the comparison
+        # CASE WHEN either is NULL THEN use is_distinct_from
+        #      ELSE check if ABS(diff) > tolerance
+        return f"""
+        CASE 
+            WHEN {null_check} THEN {dialect.is_distinct_from(col1, col2)}
+            ELSE {abs_diff} > {self._float_tolerance_manager.tolerance}
+        END
+        """.strip()
+
     def _create_outer_join(self, table1, table2):
         db = table1.database
         if db is not table2.database:
@@ -316,16 +400,84 @@ class JoinDiffer(TableDiffer):
 
         cols1 = table1.relevant_columns
         cols2 = table2.relevant_columns
-        if len(cols1) != len(cols2):
-            raise ValueError("The provided columns are of a different count")
+        
+        # Apply column remapping if configured
+        if self._column_remapper:
+            # Get mapped column pairs
+            column_pairs = self._column_remapper.get_mapped_pairs(list(cols1), list(cols2))
+            
+            # Validate mappings
+            is_valid, warnings = self._column_remapper.validate_mappings(list(cols1), list(cols2))
+            for warning in warnings:
+                logger.warning(f"Column mapping warning: {warning}")
+            
+            # Extract columns for comparison
+            cols1_mapped = [pair[0] for pair in column_pairs]
+            cols2_mapped = [pair[1] for pair in column_pairs]
+            
+            logger.info(f"Column remapping: {len(column_pairs)} column pairs will be compared")
+            for src, tgt in column_pairs[:5]:  # Show first 5 mappings
+                logger.info(f"  {src} → {tgt}")
+            if len(column_pairs) > 5:
+                logger.info(f"  ... and {len(column_pairs) - 5} more")
+                
+            cols1 = tuple(cols1_mapped)
+            cols2 = tuple(cols2_mapped)
+        else:
+            if len(cols1) != len(cols2):
+                raise ValueError("The provided columns are of a different count")
 
         a = table1.make_select()
         b = table2.make_select()
 
-        is_diff_cols = {f"is_diff_{c1}": bool_to_int(a[c1].is_distinct_from(b[c2])) for c1, c2 in safezip(cols1, cols2)}
+        # Generate comparison expressions with float tolerance support
+        is_diff_cols = {}
+        for c1, c2 in safezip(cols1, cols2):
+            if table1._schema and c1 in table1._schema:
+                coltype = table1._schema[c1]
+                
+                # Check for JSON comparison first
+                if self._json_comparison_manager and self._json_comparison_manager.should_handle_column(coltype):
+                    # Use JSON comparison
+                    comparison_expr = self._json_comparison_manager.generate_comparison_sql(
+                        str(a[c1]), str(b[c2]), coltype, db.dialect
+                    )
+                    is_diff_cols[f"is_diff_{c1}"] = bool_to_int(Code(comparison_expr))
+                    
+                # Check for float tolerance
+                elif self._float_tolerance_manager and self._float_tolerance_manager.should_use_tolerance(coltype):
+                    # Use float tolerance comparison
+                    comparison_expr = self._generate_tolerance_comparison(a[c1], b[c2], coltype, db)
+                    is_diff_cols[f"is_diff_{c1}"] = bool_to_int(Code(comparison_expr))
+                else:
+                    # Use standard comparison
+                    is_diff_cols[f"is_diff_{c1}"] = bool_to_int(a[c1].is_distinct_from(b[c2]))
+            else:
+                # No schema, use standard comparison
+                is_diff_cols[f"is_diff_{c1}"] = bool_to_int(a[c1].is_distinct_from(b[c2]))
 
-        a_cols = {f"{c}_a": NormalizeAsString(a[c]) for c in cols1}
-        b_cols = {f"{c}_b": NormalizeAsString(b[c]) for c in cols2}
+        # Apply timestamp precision before normalization if needed
+        a_cols = {}
+        b_cols = {}
+        
+        for c1, c2 in safezip(cols1, cols2):
+            a_expr = a[c1]
+            b_expr = b[c2]
+            
+            # Apply timestamp precision if configured
+            if self._timestamp_precision_manager and table1._schema and c1 in table1._schema:
+                coltype = table1._schema[c1]
+                if self._timestamp_precision_manager.should_handle_timestamp(coltype):
+                    # Apply precision truncation before normalization
+                    a_expr = Code(self._timestamp_precision_manager.generate_precision_sql(
+                        str(a_expr), coltype, self.timestamp_precision, db.dialect
+                    ))
+                    b_expr = Code(self._timestamp_precision_manager.generate_precision_sql(
+                        str(b_expr), coltype, self.timestamp_precision, db.dialect
+                    ))
+            
+            a_cols[f"{c1}_a"] = NormalizeAsString(a_expr)
+            b_cols[f"{c2}_b"] = NormalizeAsString(b_expr)
         # Order columns as col1_a, col1_b, col2_a, col2_b, etc.
         cols = {k: v for k, v in chain(*zip(a_cols.items(), b_cols.items()))}
 

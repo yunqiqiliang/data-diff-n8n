@@ -173,9 +173,31 @@ class Oracle(ThreadedDatabase):
     def create_connection(self):
         self._oracle = import_oracle()
         try:
-            c = self._oracle.connect(**self.kwargs)
+            # 增强连接参数
+            conn_params = self.kwargs.copy()
+            # Oracle 特定的连接池和超时设置
+            if hasattr(self._oracle, 'SessionPool'):
+                # 如果支持，可以使用连接池
+                conn_params.setdefault('threaded', True)
+                
+            c = self._oracle.connect(**conn_params)
+            
+            # 设置会话参数以提高稳定性
+            cursor = c.cursor()
+            try:
+                # 设置更长的空闲超时
+                cursor.execute("ALTER SESSION SET IDLE_TIME = 60")  # 60分钟
+            except:
+                pass  # 某些权限可能不允许
+                
             if SESSION_TIME_ZONE:
-                c.cursor().execute(f"ALTER SESSION SET TIME_ZONE = '{SESSION_TIME_ZONE}'")
+                cursor.execute(f"ALTER SESSION SET TIME_ZONE = '{SESSION_TIME_ZONE}'")
+            
+            # 测试连接
+            cursor.execute("SELECT 1 FROM DUAL")
+            cursor.fetchone()
+            cursor.close()
+            
             return c
         except Exception as e:
             raise ConnectError(*e.args) from e

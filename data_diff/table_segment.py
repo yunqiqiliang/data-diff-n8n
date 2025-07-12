@@ -103,6 +103,10 @@ class TableSegment:
         where (str, optional): An additional 'where' expression to restrict the search space.
 
         case_sensitive (bool): If false, the case of column names will adjust according to the schema. Default is true.
+        
+        sample_size (int, optional): Number of rows to sample for comparison
+        sampling_method (str, optional): Sampling method - 'LIMIT', 'SYSTEM', 'BERNOULLI', or database-specific
+        sampling_percent (float, optional): Percentage of rows to sample (0-100)
 
     """
 
@@ -122,6 +126,11 @@ class TableSegment:
     min_update: Optional[DbTime] = None
     max_update: Optional[DbTime] = None
     where: Optional[str] = None
+    
+    # Sampling parameters
+    sample_size: Optional[int] = None
+    sampling_method: str = "LIMIT"
+    sampling_percent: Optional[float] = None
 
     case_sensitive: Optional[bool] = True
     _schema: Optional[Schema] = None
@@ -174,8 +183,294 @@ class TableSegment:
         return table(*self.table_path, schema=self._schema)
 
     def make_select(self):
-        return self.source_table.where(
+        query = self.source_table.where(
             *self._make_key_range(), *self._make_update_range(), Code(self._where()) if self.where else SKIP
+        )
+        
+        # Apply sampling if configured
+        if self.sample_size or self.sampling_percent:
+            query = self._apply_sampling(query)
+        
+        return query
+    
+    def _apply_sampling(self, query):
+        """Apply sampling to the query based on database type and sampling method"""
+        db_name = self.database.name.lower()
+        
+        # Check if deterministic sampling is requested
+        if self.sampling_method.upper() == "DETERMINISTIC":
+            return self._apply_deterministic_sampling(query)
+        
+        if self.sampling_percent:
+            # Percentage-based sampling
+            if db_name in ("postgresql", "postgres"):
+                # PostgreSQL supports TABLESAMPLE SYSTEM and BERNOULLI
+                method = self.sampling_method.upper()
+                if method not in ("SYSTEM", "BERNOULLI"):
+                    method = "SYSTEM"  # Default to SYSTEM for PostgreSQL
+                return Code(f"({query}) TABLESAMPLE {method} ({self.sampling_percent})")
+            
+            elif db_name == "clickzetta":
+                # ClickZetta supports TABLESAMPLE with percentage
+                return Code(f"({query}) TABLESAMPLE ({self.sampling_percent} PERCENT)")
+            
+            elif db_name == "clickhouse":
+                # ClickHouse uses SAMPLE with decimal (0-1) or rows
+                decimal_percent = self.sampling_percent / 100.0
+                return Code(f"({query}) SAMPLE {decimal_percent}")
+            
+            elif db_name in ("mysql", "mariadb"):
+                # MySQL doesn't have TABLESAMPLE, use ORDER BY RAND() with LIMIT
+                # Note: This is expensive for large tables
+                row_count = int(self.count() * self.sampling_percent / 100)
+                return Code(f"({query} ORDER BY RAND() LIMIT {row_count})")
+            
+            elif db_name == "snowflake":
+                # Snowflake supports SAMPLE
+                return Code(f"({query}) SAMPLE ({self.sampling_percent})")
+            
+            elif db_name == "bigquery":
+                # BigQuery supports TABLESAMPLE
+                return Code(f"({query}) TABLESAMPLE SYSTEM ({self.sampling_percent} PERCENT)")
+            
+            elif db_name == "databricks":
+                # Databricks supports TABLESAMPLE
+                return Code(f"({query}) TABLESAMPLE ({self.sampling_percent} PERCENT)")
+            
+            elif db_name == "duckdb":
+                # DuckDB supports TABLESAMPLE or USING SAMPLE
+                return Code(f"({query}) TABLESAMPLE {self.sampling_percent}%")
+            
+            elif db_name in ("mssql", "sqlserver"):
+                # MS SQL Server supports TABLESAMPLE
+                return Code(f"({query}) TABLESAMPLE ({self.sampling_percent} PERCENT)")
+            
+            elif db_name == "oracle":
+                # Oracle uses SAMPLE without TABLESAMPLE keyword
+                return Code(f"({query}) SAMPLE({self.sampling_percent})")
+            
+            elif db_name in ("presto", "trino"):
+                # Presto/Trino support TABLESAMPLE with BERNOULLI or SYSTEM
+                method = self.sampling_method.upper()
+                if method not in ("SYSTEM", "BERNOULLI"):
+                    method = "BERNOULLI"  # Default to BERNOULLI for better randomness
+                return Code(f"({query}) TABLESAMPLE {method}({self.sampling_percent})")
+            
+            elif db_name == "vertica":
+                # Vertica supports TABLESAMPLE
+                return Code(f"({query}) TABLESAMPLE({self.sampling_percent})")
+            
+            elif db_name == "redshift":
+                # Redshift doesn't have TABLESAMPLE, use WHERE RANDOM() < percentage
+                decimal_percent = self.sampling_percent / 100.0
+                return Code(f"SELECT * FROM ({query}) WHERE RANDOM() < {decimal_percent}")
+            
+            else:
+                # For other databases, raise an error
+                raise NotImplementedError(
+                    f"Database '{db_name}' does not support sampling. "
+                    f"Supported databases: PostgreSQL, ClickZetta, ClickHouse, MySQL, Snowflake, "
+                    f"BigQuery, Databricks, DuckDB, MS SQL Server, Oracle, Presto, Trino, Vertica, Redshift"
+                )
+                
+        elif self.sample_size:
+            # Fixed size sampling
+            total_count = None
+            
+            if db_name in ("postgresql", "postgres"):
+                # PostgreSQL: calculate percentage for TABLESAMPLE
+                if self.sampling_method.upper() in ("SYSTEM", "BERNOULLI"):
+                    total_count = self.count()
+                    if total_count > 0:
+                        # Add safety margin since TABLESAMPLE is approximate
+                        percent = min(100, (self.sample_size / total_count) * 100 * 1.5)
+                        return Code(f"({query}) TABLESAMPLE {self.sampling_method.upper()} ({percent})")
+                
+            elif db_name == "clickzetta":
+                # ClickZetta: supports both percentage and row count
+                if self.sample_size < 10000:  # Small sample, use row count directly
+                    return Code(f"({query}) TABLESAMPLE SYSTEM ({self.sample_size} ROWS)")
+                else:
+                    # Large sample, calculate percentage
+                    total_count = self.count()
+                    if total_count > 0:
+                        percent = min(100, (self.sample_size / total_count) * 100 * 1.2)
+                        return Code(f"({query}) TABLESAMPLE ({percent} PERCENT)")
+            
+            elif db_name == "clickhouse":
+                # ClickHouse supports direct row count sampling
+                return Code(f"({query}) SAMPLE {self.sample_size}")
+            
+            elif db_name in ("mysql", "mariadb"):
+                # MySQL: ORDER BY RAND() with LIMIT
+                return Code(f"({query} ORDER BY RAND() LIMIT {self.sample_size})")
+            
+            elif db_name == "snowflake":
+                # Snowflake supports SAMPLE with ROWS
+                return Code(f"({query}) SAMPLE ({self.sample_size} ROWS)")
+            
+            elif db_name == "bigquery":
+                # BigQuery: Calculate percentage
+                total_count = self.count()
+                if total_count > 0:
+                    percent = min(100, (self.sample_size / total_count) * 100)
+                    return Code(f"({query}) TABLESAMPLE SYSTEM ({percent} PERCENT)")
+            
+            elif db_name == "databricks":
+                # Databricks supports ROWS (but uses LIMIT internally)
+                return Code(f"({query}) TABLESAMPLE ({self.sample_size} ROWS)")
+            
+            elif db_name == "duckdb":
+                # DuckDB: calculate percentage
+                total_count = self.count()
+                if total_count > 0:
+                    percent = min(100, (self.sample_size / total_count) * 100)
+                    return Code(f"({query}) TABLESAMPLE {percent}%")
+            
+            elif db_name in ("mssql", "sqlserver"):
+                # MS SQL Server supports ROWS
+                return Code(f"({query}) TABLESAMPLE ({self.sample_size} ROWS)")
+            
+            elif db_name == "oracle":
+                # Oracle: calculate percentage
+                total_count = self.count()
+                if total_count > 0:
+                    percent = min(100, (self.sample_size / total_count) * 100)
+                    return Code(f"({query}) SAMPLE({percent})")
+            
+            elif db_name in ("presto", "trino"):
+                # Presto/Trino: calculate percentage
+                total_count = self.count()
+                if total_count > 0:
+                    percent = min(100, (self.sample_size / total_count) * 100 * 1.2)
+                    method = self.sampling_method.upper()
+                    if method not in ("SYSTEM", "BERNOULLI"):
+                        method = "BERNOULLI"
+                    return Code(f"({query}) TABLESAMPLE {method}({percent})")
+            
+            elif db_name == "vertica":
+                # Vertica: calculate percentage
+                total_count = self.count()
+                if total_count > 0:
+                    percent = min(100, (self.sample_size / total_count) * 100)
+                    return Code(f"({query}) TABLESAMPLE({percent})")
+            
+            elif db_name == "redshift":
+                # Redshift: use WHERE RANDOM() with approximate percentage
+                total_count = self.count()
+                if total_count > 0:
+                    # Add safety margin for randomness
+                    decimal_percent = min(1.0, (self.sample_size / total_count) * 1.5)
+                    return Code(
+                        f"SELECT * FROM ({query}) WHERE RANDOM() < {decimal_percent} "
+                        f"LIMIT {self.sample_size}"
+                    )
+            
+            # If no sampling method matched, raise an error
+            raise NotImplementedError(
+                f"Database '{db_name}' does not support sampling with sample_size. "
+                f"All supported databases have been implemented."
+            )
+        
+        return query
+    
+    def _apply_deterministic_sampling(self, query):
+        """
+        Apply deterministic sampling that produces the same results across different databases.
+        Uses modulo operation on key columns to ensure both sides sample the same rows.
+        """
+        if not self.key_columns:
+            raise ValueError("Deterministic sampling requires key columns to be specified")
+        
+        db_name = self.database.name.lower()
+        
+        # Calculate sampling rate
+        if self.sampling_percent:
+            # For percentage, use modulo to select rows
+            # E.g., 10% sampling = select rows where key % 10 = 0
+            modulo = int(100 / self.sampling_percent)
+        elif self.sample_size:
+            # For fixed size, we need to know total count
+            total_count = self.count()
+            if total_count <= self.sample_size:
+                return query  # No sampling needed
+            modulo = max(2, int(total_count / self.sample_size))
+        else:
+            return query  # No sampling configured
+        
+        # Build the deterministic WHERE clause based on key column(s)
+        if len(self.key_columns) == 1:
+            # Single key column - use modulo directly
+            key_col = self.key_columns[0]
+            
+            # Different databases have different modulo syntax
+            if db_name in ("postgresql", "postgres", "redshift"):
+                where_clause = f"(CAST({key_col} AS BIGINT) % {modulo}) = 0"
+            elif db_name == "clickzetta":
+                where_clause = f"(toInt64({key_col}) % {modulo}) = 0"
+            elif db_name == "clickhouse":
+                where_clause = f"(toUInt64({key_col}) % {modulo}) = 0"
+            elif db_name in ("mysql", "mariadb"):
+                where_clause = f"(CAST({key_col} AS UNSIGNED) % {modulo}) = 0"
+            elif db_name == "snowflake":
+                where_clause = f"(CAST({key_col} AS NUMBER) % {modulo}) = 0"
+            elif db_name == "bigquery":
+                where_clause = f"(CAST({key_col} AS INT64) % {modulo}) = 0"
+            elif db_name in ("databricks", "spark"):
+                where_clause = f"(CAST({key_col} AS BIGINT) % {modulo}) = 0"
+            elif db_name == "duckdb":
+                where_clause = f"(CAST({key_col} AS BIGINT) % {modulo}) = 0"
+            elif db_name in ("mssql", "sqlserver"):
+                where_clause = f"(CAST({key_col} AS BIGINT) % {modulo}) = 0"
+            elif db_name == "oracle":
+                where_clause = f"(MOD(TO_NUMBER({key_col}), {modulo})) = 0"
+            elif db_name in ("presto", "trino"):
+                where_clause = f"(CAST({key_col} AS BIGINT) % {modulo}) = 0"
+            elif db_name == "vertica":
+                where_clause = f"(CAST({key_col} AS INT) % {modulo}) = 0"
+            else:
+                # Generic SQL
+                where_clause = f"(CAST({key_col} AS INTEGER) % {modulo}) = 0"
+                
+        else:
+            # Multiple key columns - use hash of concatenated keys
+            # This ensures consistent sampling across composite keys
+            key_concat = " || ".join([f"CAST({k} AS VARCHAR)" for k in self.key_columns])
+            
+            if db_name in ("postgresql", "postgres"):
+                # PostgreSQL has built-in hashtext function
+                where_clause = f"(ABS(hashtext({key_concat})) % {modulo}) = 0"
+            elif db_name == "clickzetta":
+                where_clause = f"(cityHash64({key_concat}) % {modulo}) = 0"
+            elif db_name == "clickhouse":
+                where_clause = f"(cityHash64({key_concat}) % {modulo}) = 0"
+            elif db_name in ("mysql", "mariadb"):
+                # MySQL uses CRC32 for hashing
+                where_clause = f"(CRC32({key_concat}) % {modulo}) = 0"
+            elif db_name == "snowflake":
+                where_clause = f"(ABS(HASH({key_concat})) % {modulo}) = 0"
+            elif db_name == "bigquery":
+                where_clause = f"(ABS(FARM_FINGERPRINT({key_concat})) % {modulo}) = 0"
+            elif db_name == "redshift":
+                where_clause = f"(ABS(CHECKSUM({key_concat})) % {modulo}) = 0"
+            else:
+                # Fallback: sample based on first key only
+                logger.warning(f"Database {db_name} doesn't support hash functions for composite keys. Using first key only.")
+                key_col = self.key_columns[0]
+                where_clause = f"(CAST({key_col} AS INTEGER) % {modulo}) = 0"
+        
+        # Apply the WHERE clause
+        existing_where = self._where()
+        if existing_where:
+            combined_where = f"({existing_where}) AND ({where_clause})"
+        else:
+            combined_where = where_clause
+            
+        # Return a new query with the deterministic sampling condition
+        return self.source_table.where(
+            *self._make_key_range(), 
+            *self._make_update_range(), 
+            Code(combined_where)
         )
 
     def get_values(self) -> list:

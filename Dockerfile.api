@@ -21,8 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装 Poetry
-RUN pip install --upgrade pip setuptools wheel poetry
+# 设置 pip 使用阿里云镜像源 - 禁用代理
+RUN NO_PROXY=* no_proxy=* pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+
+# 安装 Poetry - 禁用代理
+RUN NO_PROXY=* no_proxy=* pip install --upgrade pip setuptools wheel poetry
 
 # 配置 Poetry（不创建虚拟环境，直接安装到系统）
 RUN poetry config virtualenvs.create false
@@ -30,8 +33,12 @@ RUN poetry config virtualenvs.create false
 # 复制依赖文件
 COPY pyproject.toml poetry.lock ./
 
-# 安装 Python 依赖
-RUN poetry install --only main --no-root
+# 配置 Poetry 超时时间
+ENV POETRY_REQUESTS_TIMEOUT=300
+ENV POETRY_PYPI_MIRROR_URL=https://mirrors.aliyun.com/pypi/simple/
+
+# 安装 Python 依赖 - 禁用代理
+RUN NO_PROXY=* no_proxy=* poetry install --only main --no-root --no-interaction --no-ansi -vvv
 
 # 复制项目源码
 COPY data_diff/ ./data_diff/

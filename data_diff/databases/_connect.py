@@ -297,11 +297,20 @@ class Connect_SetUTC(Connect):
     def _connection_created(self, db):
         db = super()._connection_created(db)
         try:
+            # 先测试连接是否有效
+            db.query("SELECT 1")
+            # 再尝试设置时区
             db.query(db.dialect.set_timezone_to_utc())
         except NotImplementedError:
             logging.debug(
                 f"Database '{db}' does not allow setting timezone. We recommend making sure it's set to 'UTC'."
             )
+        except Exception as e:
+            if "connection" in str(e).lower() and "closed" in str(e).lower():
+                logging.error(f"Connection appears to be closed immediately after creation: {e}")
+                raise
+            # 其他错误可能是时区设置不支持，可以忽略
+            logging.debug(f"Error during connection initialization: {e}")
         return db
 
 

@@ -142,7 +142,24 @@ class MySQL(ThreadedDatabase):
     def create_connection(self):
         mysql = import_mysql()
         try:
-            return mysql.connect(charset="utf8", use_unicode=True, **self._args)
+            # 增强连接参数
+            conn_args = self._args.copy()
+            conn_args.update({
+                'charset': 'utf8',
+                'use_unicode': True,
+                'autocommit': True,  # 自动提交，避免事务问题
+                'connect_timeout': 30,  # 连接超时
+            })
+            
+            conn = mysql.connect(**conn_args)
+            
+            # 测试连接
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1")
+            cursor.fetchone()
+            cursor.close()
+            
+            return conn
         except mysql.Error as e:
             if e.errno == mysql.errorcode.ER_ACCESS_DENIED_ERROR:
                 raise ConnectError("Bad user name or password") from e

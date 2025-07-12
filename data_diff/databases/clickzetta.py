@@ -7,6 +7,7 @@ from data_diff.abcs.database_types import (
     Integer,
     Float,
     Decimal,
+    JSON,
     Timestamp,
     Text,
     TemporalType,
@@ -28,7 +29,7 @@ from data_diff.databases.base import (
 from data_diff.schema import RawColumnInfo
 
 
-@import_helper(text="You can install it using 'pip install clickzetta-connector'")
+@import_helper(text="You can install it using 'pip install clickzetta-connector-python'")
 def import_clickzetta():
     import clickzetta
 
@@ -40,7 +41,7 @@ class Dialect(BaseDialect):
     name = "Clickzetta"
     ROUNDS_ON_PREC_LOSS = True
     TYPE_CLASSES = {
-        # Numbers
+        # Numbers - Traditional SQL aliases
         "INT": Integer,
         "SMALLINT": Integer,
         "TINYINT": Integer,
@@ -48,16 +49,34 @@ class Dialect(BaseDialect):
         "FLOAT": Float,
         "DOUBLE": Float,
         "DECIMAL": Decimal,
+        # Numbers - Explicit bit-width types (ClickZetta native)
+        "INT8": Integer,      # 8-bit signed integer
+        "INT16": Integer,     # 16-bit signed integer
+        "INT32": Integer,     # 32-bit signed integer
+        "INT64": Integer,     # 64-bit signed integer
+        "FLOAT32": Float,     # 32-bit floating point
+        "FLOAT64": Float,     # 64-bit floating point
         # Date
         "DATE": Date,
         # Timestamps
         "TIMESTAMP": Timestamp,
+        "TIMESTAMP_LTZ": Timestamp,  # Timestamp with local timezone (internal representation)
+        "TIMESTAMP_NTZ": Timestamp,  # Timestamp without timezone (new in clickzetta-connector-python)
         # Text
         "STRING": Text,
         "CHAR": Text,
         "VARCHAR": Text,
+        # Binary
+        "BINARY": Text,       # Binary data (mapped to Text for comparison)
         # Boolean
         "BOOLEAN": Boolean,
+        "BOOL": Boolean,      # Alias for BOOLEAN (used in SqlTypeNames enum)
+        # Complex types
+        "JSON": JSON,         # JSON data type (supported by ClickZetta)
+        "VECTOR": Text,       # VECTOR type mapped to Text for comparison
+        # Note: Complex and special types (ARRAY, MAP, STRUCT, JSON, VECTOR, etc.) 
+        # are not included here. They will be automatically handled as UnknownColType
+        # by the parse_type method when not found in TYPE_CLASSES.
     }
 
     def md5_as_int(self, s: str) -> str:
@@ -117,7 +136,7 @@ class Clickzetta(ThreadedDatabase):
         else:
             # 确保必要字段存在
             self._args.setdefault('instance', '')
-            self._args.setdefault('service', 'uat-api.clickzetta.com')
+            self._args.setdefault('service', 'api.clickzetta.com')
 
         self._args.setdefault('workspace', 'default')
         self._args.setdefault('virtualcluster', 'default_ap')
@@ -128,26 +147,40 @@ class Clickzetta(ThreadedDatabase):
         clickzetta = import_clickzetta()
 
         try:
-            # 添加调试日志
-            logging.error(f"DEBUG: Clickzetta connection args: {self._args}")
-            logging.error(f"DEBUG: username={self._args.get('username', self._args.get('user'))}")
-            logging.error(f"DEBUG: password={'***' if self._args.get('password') else 'None'}")
-            logging.error(f"DEBUG: instance={self._args.get('instance', '')}")
-            logging.error(f"DEBUG: service={self._args.get('service', 'uat-api.clickzetta.com')}")
-            logging.error(f"DEBUG: workspace={self._args.get('workspace', 'default')}")
-            logging.error(f"DEBUG: virtualcluster={self._args.get('virtualcluster', 'default_ap')}")
-            logging.error(f"DEBUG: schema={self.default_schema}")
-
-            return clickzetta.connect(
-                username=self._args.get("username", self._args.get("user")),
-                password=self._args.get("password", ""),
-                instance=self._args.get("instance", ""),
-                service=self._args.get("service", "uat-api.clickzetta.com"),
-                workspace=self._args.get("workspace", "default"),
-                vcluster=self._args.get("virtualcluster", "default_ap"),
-                schema=self.default_schema,
-            )
+            # 移除调试日志，使用 info 级别
+            logging.info(f"Creating Clickzetta connection to {self._args.get('instance', '')}.{self._args.get('service', 'api.clickzetta.com')}")
+            
+            # 创建连接参数
+            conn_params = {
+                "username": self._args.get("username", self._args.get("user")),
+                "password": self._args.get("password", ""),
+                "instance": self._args.get("instance", ""),
+                "service": self._args.get("service", "uat-api.clickzetta.com"),
+                "workspace": self._args.get("workspace", "default"),
+                "vcluster": self._args.get("virtualcluster", "default_ap"),
+                "schema": self.default_schema,
+            }
+            
+            # 注意：根据文档，ClickZetta 连接不支持 timeout 或 retry_count 参数
+            # 只支持通过 hints 设置 SQL 查询超时，例如：
+            # cursor.execute('SELECT ...', parameters={'hints': {'sdk.job.timeout': 30}})
+            
+            conn = clickzetta.connect(**conn_params)
+            
+            # 测试连接
+            try:
+                cursor = conn.cursor()
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+                cursor.close()
+                logging.info("Clickzetta connection test successful")
+            except Exception as test_error:
+                logging.warning(f"Clickzetta connection test failed: {test_error}")
+                # 继续，因为某些操作可能仍然可以工作
+            
+            return conn
         except Exception as e:
+            logging.error(f"Failed to create Clickzetta connection: {e}")
             raise ConnectionError(*e.args) from e
 
     def query_table_schema(self, path: DbPath) -> Dict[str, tuple]:
@@ -179,7 +212,13 @@ class Clickzetta(ThreadedDatabase):
 
         resulted_rows = []
         for row in rows:
-            row_type = "DECIMAL" if row[1].startswith("DECIMAL") else row[1]
+            # Handle parameterized types (DECIMAL, CHAR, VARCHAR, etc.)
+            raw_type = row[1].upper()
+            if '(' in raw_type:
+                row_type = raw_type.split('(')[0]
+            else:
+                row_type = raw_type
+
             type_cls = self.dialect.TYPE_CLASSES.get(row_type, UnknownColType)
 
             if issubclass(type_cls, Integer):
@@ -192,8 +231,14 @@ class Clickzetta(ThreadedDatabase):
                 )
 
             elif issubclass(type_cls, Decimal):
-                items = row[1][8:].rstrip(")").split(",")
-                numeric_precision, numeric_scale = int(items[0]), int(items[1])
+                # Extract precision and scale from DECIMAL(p,s)
+                if '(' in raw_type and ')' in raw_type:
+                    params = raw_type[raw_type.index('(')+1:raw_type.index(')')].split(',')
+                    numeric_precision = int(params[0].strip())
+                    numeric_scale = int(params[1].strip()) if len(params) > 1 else 0
+                else:
+                    numeric_precision, numeric_scale = 38, 0  # Default values
+
                 raw_info = RawColumnInfo(
                     column_name=row[0],
                     data_type=row_type,

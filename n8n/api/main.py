@@ -5,7 +5,8 @@ Data-Diff N8N API 主应用
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse as FastAPIJSONResponse, PlainTextResponse
+from starlette.responses import Response
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 import asyncio
@@ -16,6 +17,7 @@ from urllib.parse import urlparse, parse_qs
 from json import JSONDecodeError
 
 from .utils import parse_connection_string, create_error_response, create_success_response
+from .json_utils import safe_json_dumps
 from .response_models import (
     ErrorCodes, BaseResponse, ConnectionTestResponse, ComparisonStartResponse,
     ComparisonResultResponse, TableListResponse, QueryExecutionResponse,
@@ -36,10 +38,26 @@ from ..core import (
     ErrorHandler
 )
 from .advanced_routes import router as advanced_router
+from .history_routes import router as history_router
 
 # 配置日志
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
+
+
+# 自定义JSONResponse以处理特殊数据类型
+class JSONResponse(FastAPIJSONResponse):
+    """Custom JSONResponse that uses our enhanced JSON encoder."""
+    
+    def render(self, content: Any) -> bytes:
+        """Render the content using our safe JSON encoder."""
+        return safe_json_dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":")
+        ).encode("utf-8")
 
 # 创建 FastAPI 应用
 app = FastAPI(
@@ -61,6 +79,7 @@ app.add_middleware(
 
 # 包含高级路由
 app.include_router(advanced_router)
+app.include_router(history_router)
 
 # Prometheus 指标 (如果可用)
 if PROMETHEUS_AVAILABLE:
@@ -145,6 +164,9 @@ class ComparisonConfig(BaseModel):
     tolerance: Optional[float] = Field(0.001, description="数值容差")
     case_sensitive: Optional[bool] = Field(True, description="大小写敏感")
     strict_type_checking: Optional[bool] = Field(False, description="严格类型检查")
+    enable_column_statistics: Optional[bool] = Field(False, description="启用列统计")
+    enable_classification: Optional[bool] = Field(False, description="启用差异分类")
+    treat_null_as_critical: Optional[bool] = Field(False, description="将NULL视为严重")
 
 
 class ComparisonRequest(BaseModel):
@@ -194,6 +216,14 @@ class NestedComparisonConfig(BaseModel):
     bisection_threshold: Optional[int] = Field(1024, description="二分法阈值")
     where_condition: Optional[str] = Field(None, description="WHERE条件")
     strict_type_checking: Optional[bool] = Field(False, description="严格类型检查")
+    enable_column_statistics: Optional[bool] = Field(False, description="启用列统计")
+    enable_classification: Optional[bool] = Field(False, description="启用差异分类")
+    treat_null_as_critical: Optional[bool] = Field(False, description="将NULL视为严重")
+    timeline_column: Optional[str] = Field(None, description="时间线列")
+    timeline_start_time: Optional[str] = Field(None, description="时间线开始时间")
+    timeline_end_time: Optional[str] = Field(None, description="时间线结束时间")
+    timeline_buckets: Optional[int] = Field(20, description="时间桶数")
+    timeline_max_differences: Optional[int] = Field(10000, description="最大分析差异数")
 
 
 class NestedComparisonRequest(BaseModel):
@@ -784,7 +814,17 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
             "sampling_confidence": float(params.get('sampling_confidence', 0.95)),
             "sampling_tolerance": float(params.get('sampling_tolerance', 0.01)),
             "auto_sample_threshold": int(params.get('auto_sample_threshold', 100000)),
-            "enable_sampling": params.get('enable_sampling', True) if isinstance(params.get('enable_sampling'), bool) else str(params.get('enable_sampling', 'true')).lower() == 'true'
+            "enable_sampling": params.get('enable_sampling', True) if isinstance(params.get('enable_sampling'), bool) else str(params.get('enable_sampling', 'true')).lower() == 'true',
+            # 添加列统计和分类参数
+            "enable_column_statistics": params.get('enable_column_statistics', False) if isinstance(params.get('enable_column_statistics'), bool) else str(params.get('enable_column_statistics', 'false')).lower() == 'true',
+            "enable_classification": params.get('enable_classification', False) if isinstance(params.get('enable_classification'), bool) else str(params.get('enable_classification', 'false')).lower() == 'true',
+            "treat_null_as_critical": params.get('treat_null_as_critical', False) if isinstance(params.get('treat_null_as_critical'), bool) else str(params.get('treat_null_as_critical', 'false')).lower() == 'true',
+            # 添加时间线分析参数
+            "timeline_column": params.get('timeline_column'),
+            "timeline_start_time": params.get('timeline_start_time'),
+            "timeline_end_time": params.get('timeline_end_time'),
+            "timeline_buckets": int(params.get('timeline_buckets', 20)) if params.get('timeline_buckets') else 20,
+            "timeline_max_differences": int(params.get('timeline_max_differences', 10000)) if params.get('timeline_max_differences') else 10000
         }
 
         logger.info(f"比对配置: {comparison_config}")
@@ -1369,10 +1409,31 @@ async def execute_comparison_async(
         global comparison_engine
         logger.info(f"Starting async comparison {comparison_id}")
         
-        # 更新任务状态为运行中
+        # 如果启用了物化，创建任务记录
+        if comparison_engine.result_materializer and comparison_config.get('materialize_results', True):
+            task_config = {
+                'source_connection': source_config,
+                'target_connection': target_config,
+                'source_table': comparison_config.get('source_table', ''),
+                'target_table': comparison_config.get('target_table', ''),
+                'key_columns': comparison_config.get('key_columns', []),
+                'algorithm': comparison_config.get('algorithm', 'AUTO'),
+                'sampling': comparison_config.get('sampling'),
+                'column_remapping': comparison_config.get('column_remapping'),
+                'where_conditions': comparison_config.get('where_conditions')
+            }
+            comparison_engine.result_materializer.create_comparison_task(comparison_id, task_config)
+            comparison_engine.result_materializer.update_task_status(
+                comparison_id, "running", 10, "初始化连接"
+            )
+        
+        # 更新内存中的任务状态（向后兼容）
         update_task_status(comparison_id, "running")
         update_task_progress(comparison_id, 10, "初始化连接")
 
+        # 传递 comparison_id 给比对引擎
+        comparison_config['comparison_id'] = comparison_id
+        
         result = await comparison_engine.compare_tables(
             source_config=source_config,
             target_config=target_config,
@@ -1516,7 +1577,16 @@ async def compare_tables_nested_endpoint(request: NestedComparisonRequest, backg
             "case_sensitive": request.comparison_config.case_sensitive if request.comparison_config.case_sensitive is not None else True,
             "bisection_threshold": request.comparison_config.bisection_threshold or 1024,
             "where_condition": request.comparison_config.where_condition,
-            "strict_type_checking": request.comparison_config.strict_type_checking or False
+            "strict_type_checking": request.comparison_config.strict_type_checking or False,
+            # 添加新功能参数
+            "enable_column_statistics": request.comparison_config.enable_column_statistics or False,
+            "enable_classification": request.comparison_config.enable_classification or False,
+            "treat_null_as_critical": request.comparison_config.treat_null_as_critical or False,
+            "timeline_column": request.comparison_config.timeline_column,
+            "timeline_start_time": request.comparison_config.timeline_start_time,
+            "timeline_end_time": request.comparison_config.timeline_end_time,
+            "timeline_buckets": request.comparison_config.timeline_buckets or 20,
+            "timeline_max_differences": request.comparison_config.timeline_max_differences or 10000
         }
 
         logger.info(f"转换后的配置 - 源: {source_db_config['driver']}, 目标: {target_db_config['driver']}")

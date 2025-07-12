@@ -147,7 +147,10 @@ INSERT INTO orders (user_id, order_number, total_amount, status, shipping_addres
 
 CREATE SCHEMA IF NOT EXISTS public;
 
--- 比对历史表
+-- 创建结果存储的 schema
+CREATE SCHEMA IF NOT EXISTS data_diff_results;
+
+-- 比对历史表（保留原表用于向后兼容）
 CREATE TABLE comparison_history (
     id SERIAL PRIMARY KEY,
     comparison_id UUID UNIQUE NOT NULL,
@@ -166,32 +169,95 @@ CREATE TABLE comparison_history (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- 工作流定义表
-CREATE TABLE workflow_definitions (
+-- 比对结果汇总表
+CREATE TABLE data_diff_results.comparison_summary (
     id SERIAL PRIMARY KEY,
-    workflow_id UUID UNIQUE NOT NULL,
-    name VARCHAR(200) NOT NULL,
-    description TEXT,
-    template_name VARCHAR(100),
-    definition JSONB NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    is_active BOOLEAN DEFAULT true
-);
-
--- 调度任务表
-CREATE TABLE scheduled_jobs (
-    id SERIAL PRIMARY KEY,
-    job_id UUID UNIQUE NOT NULL,
-    workflow_id UUID REFERENCES workflow_definitions(workflow_id),
-    schedule_expression VARCHAR(100) NOT NULL,
-    schedule_type VARCHAR(20) NOT NULL,
-    timezone VARCHAR(50) DEFAULT 'UTC',
-    last_run TIMESTAMP,
-    next_run TIMESTAMP,
-    is_enabled BOOLEAN DEFAULT true,
+    comparison_id UUID UNIQUE NOT NULL,
+    source_connection JSONB NOT NULL,
+    target_connection JSONB NOT NULL,
+    source_table TEXT NOT NULL,
+    target_table TEXT NOT NULL,
+    key_columns TEXT[] NOT NULL,
+    algorithm VARCHAR(50) NOT NULL,
+    start_time TIMESTAMP NOT NULL,
+    end_time TIMESTAMP NOT NULL,
+    execution_time_seconds DECIMAL(10, 3) NOT NULL,
+    rows_compared INTEGER,
+    rows_matched INTEGER,
+    rows_different INTEGER,
+    match_rate DECIMAL(5, 2),
+    sampling_config JSONB,
+    column_remapping JSONB,
+    where_conditions JSONB,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 差异详情表
+CREATE TABLE data_diff_results.difference_details (
+    id SERIAL PRIMARY KEY,
+    comparison_id UUID NOT NULL,
+    row_key JSONB NOT NULL,
+    difference_type VARCHAR(50) NOT NULL,
+    severity VARCHAR(20) NOT NULL,
+    column_name VARCHAR(255),
+    source_value TEXT,
+    target_value TEXT,
+    metadata JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (comparison_id) REFERENCES data_diff_results.comparison_summary(comparison_id) ON DELETE CASCADE
+);
+
+-- 列统计表
+CREATE TABLE data_diff_results.column_statistics (
+    id SERIAL PRIMARY KEY,
+    comparison_id UUID NOT NULL,
+    table_side VARCHAR(10) NOT NULL CHECK (table_side IN ('source', 'target')),
+    column_name VARCHAR(255) NOT NULL,
+    data_type VARCHAR(100),
+    null_count INTEGER,
+    null_rate DECIMAL(5, 2),
+    total_count INTEGER,
+    unique_count INTEGER,
+    cardinality DECIMAL(10, 6),
+    min_value TEXT,
+    max_value TEXT,
+    avg_value DECIMAL(20, 6),
+    avg_length DECIMAL(10, 2),
+    value_distribution JSONB,
+    percentiles JSONB,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (comparison_id) REFERENCES data_diff_results.comparison_summary(comparison_id) ON DELETE CASCADE
+);
+
+-- 时间线分析表
+CREATE TABLE data_diff_results.timeline_analysis (
+    id SERIAL PRIMARY KEY,
+    comparison_id UUID NOT NULL,
+    time_column VARCHAR(255) NOT NULL,
+    period_type VARCHAR(50) NOT NULL,
+    period_start TIMESTAMP NOT NULL,
+    period_end TIMESTAMP NOT NULL,
+    source_count INTEGER,
+    target_count INTEGER,
+    matched_count INTEGER,
+    difference_count INTEGER,
+    match_rate DECIMAL(5, 2),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (comparison_id) REFERENCES data_diff_results.comparison_summary(comparison_id) ON DELETE CASCADE
+);
+
+-- 性能指标表
+CREATE TABLE data_diff_results.performance_metrics (
+    id SERIAL PRIMARY KEY,
+    comparison_id UUID NOT NULL,
+    metric_name VARCHAR(100) NOT NULL,
+    metric_value DECIMAL(20, 6) NOT NULL,
+    metric_unit VARCHAR(50),
+    metric_context JSONB,
+    recorded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (comparison_id) REFERENCES data_diff_results.comparison_summary(comparison_id) ON DELETE CASCADE
+);
+
 
 -- 告警规则表
 CREATE TABLE alert_rules (
@@ -231,11 +297,45 @@ CREATE TABLE system_metrics (
 -- 创建索引以提高查询性能
 CREATE INDEX idx_comparison_history_start_time ON comparison_history(start_time);
 CREATE INDEX idx_comparison_history_status ON comparison_history(status);
-CREATE INDEX idx_workflow_definitions_template ON workflow_definitions(template_name);
-CREATE INDEX idx_scheduled_jobs_next_run ON scheduled_jobs(next_run);
 CREATE INDEX idx_alert_history_triggered_at ON alert_history(triggered_at);
 CREATE INDEX idx_system_metrics_timestamp ON system_metrics(timestamp);
 CREATE INDEX idx_system_metrics_type_name ON system_metrics(metric_type, metric_name);
+
+-- 为 data_diff_results schema 创建索引
+CREATE INDEX idx_summary_comparison_id ON data_diff_results.comparison_summary(comparison_id);
+CREATE INDEX idx_summary_start_time ON data_diff_results.comparison_summary(start_time);
+CREATE INDEX idx_summary_tables ON data_diff_results.comparison_summary(source_table, target_table);
+CREATE INDEX idx_details_comparison_id ON data_diff_results.difference_details(comparison_id);
+CREATE INDEX idx_details_type_severity ON data_diff_results.difference_details(difference_type, severity);
+CREATE INDEX idx_statistics_comparison_id ON data_diff_results.column_statistics(comparison_id);
+CREATE INDEX idx_statistics_column ON data_diff_results.column_statistics(comparison_id, table_side, column_name);
+CREATE INDEX idx_timeline_comparison_id ON data_diff_results.timeline_analysis(comparison_id);
+CREATE INDEX idx_timeline_period ON data_diff_results.timeline_analysis(comparison_id, time_column, period_start);
+CREATE INDEX idx_metrics_comparison_id ON data_diff_results.performance_metrics(comparison_id);
+CREATE INDEX idx_metrics_name ON data_diff_results.performance_metrics(comparison_id, metric_name);
+
+-- 创建视图以便于查询
+CREATE VIEW data_diff_results.recent_comparisons AS
+SELECT 
+    cs.comparison_id,
+    cs.source_table,
+    cs.target_table,
+    cs.algorithm,
+    cs.start_time,
+    cs.execution_time_seconds,
+    cs.rows_compared,
+    cs.match_rate,
+    cs.rows_different,
+    CASE 
+        WHEN cs.match_rate >= 99.5 THEN 'Excellent'
+        WHEN cs.match_rate >= 95.0 THEN 'Good'
+        WHEN cs.match_rate >= 90.0 THEN 'Fair'
+        ELSE 'Poor'
+    END as match_quality,
+    cs.created_at
+FROM data_diff_results.comparison_summary cs
+ORDER BY cs.start_time DESC
+LIMIT 100;
 
 -- 插入一些示例数据
 INSERT INTO alert_rules (rule_name, condition_expression, severity, notification_channels) VALUES
@@ -246,3 +346,6 @@ INSERT INTO alert_rules (rule_name, condition_expression, severity, notification
 -- 授予权限
 GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO postgres;
 GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO postgres;
+GRANT ALL PRIVILEGES ON SCHEMA data_diff_results TO postgres;
+GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA data_diff_results TO postgres;
+GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA data_diff_results TO postgres;

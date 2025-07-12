@@ -1183,9 +1183,26 @@ class Database(abc.ABC):
             raise
 
     def _query_conn(self, conn, sql_code: Union[str, ThreadLocalInterpreter]) -> QueryResult:
-        c = conn.cursor()
-        callback = partial(self._query_cursor, c)
-        return apply_query(callback, sql_code)
+        try:
+            c = conn.cursor()
+            callback = partial(self._query_cursor, c)
+            return apply_query(callback, sql_code)
+        except Exception as e:
+            # 如果是连接错误，尝试重新连接一次
+            if "connection" in str(e).lower() and "closed" in str(e).lower():
+                logger.debug("Connection error detected, attempting to reconnect...")
+                try:
+                    # 重新创建连接
+                    new_conn = self.create_connection()
+                    self.thread_local.conn = new_conn
+                    # 重试查询
+                    c = new_conn.cursor()
+                    callback = partial(self._query_cursor, c)
+                    return apply_query(callback, sql_code)
+                except Exception as retry_error:
+                    logger.error(f"Retry failed: {retry_error}")
+                    raise
+            raise
 
     def close(self):
         """Close connection(s) to the database instance. Querying will stop functioning."""
@@ -1251,6 +1268,24 @@ class ThreadedDatabase(Database):
         """This method runs in a worker thread"""
         if self._init_error:
             raise self._init_error
+        
+        # 检查连接是否仍然有效，如果无效则重新创建
+        try:
+            # 尝试获取连接状态
+            if hasattr(self.thread_local, "conn"):
+                conn = self.thread_local.conn
+                # 对于PostgreSQL，检查连接是否关闭
+                if hasattr(conn, "closed") and conn.closed:
+                    logger.debug("Connection closed, recreating...")
+                    self.thread_local.conn = self.create_connection()
+        except Exception as e:
+            logger.debug(f"Connection check failed: {e}, recreating...")
+            try:
+                self.thread_local.conn = self.create_connection()
+            except Exception as ce:
+                logger.error(f"Failed to recreate connection: {ce}")
+                raise
+        
         return self._query_conn(self.thread_local.conn, sql_code)
 
     @abstractmethod

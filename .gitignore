@@ -159,3 +159,5 @@ docker-compose-local.yml
 /docs_archive
 /scripts
 /reports
+.env.dev
+.env.dev

@@ -6,6 +6,10 @@ services:
       dockerfile: Dockerfile.api
     ports:
       - "8000:8000"
+    dns:
+      - 8.8.8.8
+      - 8.8.4.4
+      - 114.114.114.114
     environment:
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/datadiff
       - REDIS_URL=redis://redis:6379
@@ -46,6 +50,9 @@ services:
       - CLICKZETTA_SCHEMA_API_URL=http://data-diff-api:8000/api/v1/tables/list
       - DATABASE_API_URL=http://data-diff-api:8000/api/v1/connections/test
       - DATABASE_SCHEMA_API_URL=http://data-diff-api:8000/api/v1/tables/list
+      # 新增的推荐配置
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_RUNNERS_ENABLED=true
     volumes:
       - n8n_data:/home/node/.n8n
       - ./n8n/dist:/home/node/.n8n/custom-extensions:ro

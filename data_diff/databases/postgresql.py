@@ -30,6 +30,13 @@ from data_diff.databases.base import (
 
 SESSION_TIME_ZONE = None  # Changed by the tests
 
+# Apply PostgreSQL stability patches
+try:
+    from data_diff.databases.postgresql_patch import apply_postgresql_patches
+    apply_postgresql_patches()
+except ImportError:
+    pass
+
 
 @import_helper("postgresql")
 def import_postgresql():
@@ -195,11 +202,22 @@ class PostgreSQL(ThreadedDatabase):
         pg = import_postgresql()
         try:
             self._args["password"] = unquote(self._args["password"])
-            self._conn = pg.connect(
-                **self._args, keepalives=1, keepalives_idle=5, keepalives_interval=2, keepalives_count=2
-            )
+            # 增加连接参数以防止连接过早关闭
+            conn_args = self._args.copy()
+            conn_args.update({
+                'keepalives': 1,
+                'keepalives_idle': 30,  # 增加到30秒
+                'keepalives_interval': 10,  # 增加到10秒
+                'keepalives_count': 5,  # 增加重试次数
+                'connect_timeout': 30  # 连接超时时间
+            })
+            self._conn = pg.connect(**conn_args)
+            # 设置自动提交模式以避免事务问题
+            self._conn.autocommit = True
             if SESSION_TIME_ZONE:
-                self._conn.cursor().execute(f"SET TIME ZONE '{SESSION_TIME_ZONE}'")
+                cursor = self._conn.cursor()
+                cursor.execute(f"SET TIME ZONE '{SESSION_TIME_ZONE}'")
+                cursor.close()
             return self._conn
         except pg.OperationalError as e:
             raise ConnectError(*e.args) from e

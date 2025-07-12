@@ -9,6 +9,7 @@ from data_diff.hashdiff_tables import HashDiffer, DEFAULT_BISECTION_THRESHOLD, D
 from data_diff.joindiff_tables import JoinDiffer, TABLE_WRITE_LIMIT
 from data_diff.table_segment import TableSegment
 from data_diff.utils import eval_name_template, Vector
+from data_diff.column_remapping import ColumnRemapper
 
 
 def connect_to_table(
@@ -81,6 +82,17 @@ def diff_tables(
     table_write_limit: int = TABLE_WRITE_LIMIT,
     # Skips diffing any rows with null keys. (joindiff only)
     skip_null_keys: bool = False,
+    # Sampling parameters
+    sample_size: Optional[int] = None,
+    sampling_method: str = "DETERMINISTIC",  # DETERMINISTIC (recommended), SYSTEM, BERNOULLI, LIMIT
+    sampling_percent: Optional[float] = None,  # For percentage-based sampling
+    # Type handling parameters
+    float_tolerance: Optional[float] = None,  # Tolerance for floating-point comparisons
+    timestamp_precision: Optional[str] = None,  # Precision for timestamp comparisons
+    json_comparison_mode: Optional[str] = None,  # JSON comparison mode: exact, normalized, semantic, keys_only
+    # Column mapping parameters
+    column_remapping: Optional[Union[str, dict]] = None,  # Column name mappings between tables
+    case_sensitive_remapping: bool = True,  # Whether column remapping is case-sensitive
 ) -> Iterator:
     """Finds the diff between table1 and table2.
 
@@ -110,6 +122,13 @@ def diff_tables(
         materialize_all_rows (bool): Materialize every row, not just those that are different. (used for `JOINDIFF`. default: False)
         table_write_limit (int): Maximum number of rows to write when materializing, per thread.
         skip_null_keys (bool): Skips diffing any rows with null PKs (displays a warning if any are null) (used for `JOINDIFF`. default: False)
+        sample_size (int, optional): Number of rows to sample for comparison. Useful for large tables.
+        sampling_method (str): Sampling method. Default is 'DETERMINISTIC'.
+            - 'DETERMINISTIC': Uses modulo on key columns to ensure both sides sample the same rows (recommended)
+            - 'SYSTEM': Database-specific system sampling (fast but may differ between databases)
+            - 'BERNOULLI': Row-level random sampling (accurate but may differ between databases)
+            - 'LIMIT': Simple limit (not recommended, not random)
+        sampling_percent (float, optional): Percentage of rows to sample (0-100). Alternative to sample_size.
 
     Note:
         The following parameters are used to override the corresponding attributes of the given :class:`TableSegment` instances:
@@ -143,6 +162,9 @@ def diff_tables(
             min_update=min_update,
             max_update=max_update,
             where=where,
+            sample_size=sample_size,
+            sampling_method=sampling_method,
+            sampling_percent=sampling_percent,
         ).items()
         if v is not None
     }
@@ -173,6 +195,11 @@ def diff_tables(
             materialize_all_rows=materialize_all_rows,
             table_write_limit=table_write_limit,
             skip_null_keys=skip_null_keys,
+            float_tolerance=float_tolerance,
+            timestamp_precision=timestamp_precision,
+            json_comparison_mode=json_comparison_mode,
+            column_remapping=column_remapping,
+            case_sensitive_remapping=case_sensitive_remapping,
         )
     else:
         raise ValueError(f"Unknown algorithm: {algorithm}")

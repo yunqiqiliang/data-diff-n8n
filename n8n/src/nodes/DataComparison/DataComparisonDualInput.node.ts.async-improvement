@@ -1,0 +1,106 @@
+// 异步改进建议
+
+// 方案1: 添加自动轮询选项
+interface IExecuteFunctions {
+  // ... 现有接口
+}
+
+// 在现有的 execute 方法中添加轮询逻辑
+async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
+  // ... 现有代码
+
+  if (operation === 'compareTable') {
+    // ... 启动比对
+
+    // 检查是否启用自动等待
+    const autoWaitForResult = this.getNodeParameter('autoWaitForResult', 0, false) as boolean;
+    
+    if (autoWaitForResult && startResult.comparison_id && startResult.status === 'started') {
+      // 自动轮询等待结果
+      const maxWaitTime = this.getNodeParameter('maxWaitTime', 0, 300) as number; // 默认5分钟
+      const pollInterval = this.getNodeParameter('pollInterval', 0, 5) as number; // 默认5秒
+      
+      const startTime = Date.now();
+      let result = startResult;
+      
+      while (result.status === 'running' || result.status === 'pending') {
+        // 检查超时
+        if (Date.now() - startTime > maxWaitTime * 1000) {
+          throw new Error(`Comparison timed out after ${maxWaitTime} seconds`);
+        }
+        
+        // 等待指定间隔
+        await new Promise(resolve => setTimeout(resolve, pollInterval * 1000));
+        
+        // 获取最新状态
+        try {
+          result = await DataComparisonDualInput.getComparisonResult(result.comparison_id);
+        } catch (error) {
+          // 如果获取失败，继续等待
+          console.log('Failed to get result, will retry:', error.message);
+        }
+      }
+      
+      // 返回最终结果
+      if (result.status === 'completed') {
+        return [this.helpers.returnJsonArray([result])];
+      } else if (result.status === 'failed') {
+        throw new Error(result.error || 'Comparison failed');
+      }
+    }
+  }
+}
+
+// 方案2: 使用 n8n 的 webhook 等待模式
+// 需要在 API 端支持 webhook 回调
+
+// 方案3: 使用 n8n 的 trigger 节点
+// 创建一个单独的 trigger 节点来监听比对完成事件
+
+// 添加新的参数定义
+{
+  displayName: 'Auto Wait for Result',
+  name: 'autoWaitForResult',
+  type: 'boolean',
+  default: false,
+  description: 'Automatically wait for the comparison to complete instead of returning immediately',
+  displayOptions: {
+    show: {
+      operation: ['compareTable'],
+    },
+  },
+},
+{
+  displayName: 'Max Wait Time',
+  name: 'maxWaitTime',
+  type: 'number',
+  default: 300,
+  description: 'Maximum time to wait for results in seconds',
+  typeOptions: {
+    minValue: 10,
+    maxValue: 3600,
+  },
+  displayOptions: {
+    show: {
+      operation: ['compareTable'],
+      autoWaitForResult: [true],
+    },
+  },
+},
+{
+  displayName: 'Poll Interval',
+  name: 'pollInterval',
+  type: 'number',
+  default: 5,
+  description: 'How often to check for results in seconds',
+  typeOptions: {
+    minValue: 1,
+    maxValue: 60,
+  },
+  displayOptions: {
+    show: {
+      operation: ['compareTable'],
+      autoWaitForResult: [true],
+    },
+  },
+}

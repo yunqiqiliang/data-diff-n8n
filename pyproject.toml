@@ -22,7 +22,7 @@ classifiers = [
 packages = [{ include = "data_diff" }]
 [tool.poetry.dependencies]
 pydantic = ">=1.10.12"
-python = ">=3.8.0,<4.0"
+python = ">=3.11,<4.0"
 fastapi = "*"
 uvicorn = {extras = ["standard"], version = "*"}
 python-multipart = "*"
@@ -38,7 +38,7 @@ rich = "*"
 toml = ">=0.10.2"
 mysql-connector-python = ">=8.0.29"
 psycopg2-binary = "*"
-clickzetta-connector = ">=0.8.51"
+clickzetta-connector-python = ">=0.8.51"
 snowflake-connector-python = {version = ">=3.0.2,<4.0.0", optional=true}
 cryptography = {version="*", optional=true}
 trino = ">=0.314.0"
@@ -76,7 +76,7 @@ vertica-python = "*"
 duckdb = ">=0.9.0"
 dbt-core = ">=1.0.0"
 ruff = ">=0.1.4"
-clickzetta-connector = ">=0.8.51"
+clickzetta-connector-python = ">=0.8.51"
 # google-cloud-bigquery = "*"
 # databricks-sql-connector = "*"
 
@@ -86,6 +86,11 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.poetry.scripts]
 data-diff = 'data_diff.__main__:main'
+
+[[tool.poetry.source]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+priority = "primary"
 
 [tool.black]
 line-length = 120

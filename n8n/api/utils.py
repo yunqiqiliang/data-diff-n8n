@@ -5,9 +5,11 @@
 from typing import Dict, Any, Optional
 import logging
 import urllib.parse
+import json
 from datetime import datetime
 from fastapi import HTTPException, status
 from .response_models import ErrorDetail, ErrorCodes
+from .json_utils import safe_json_dump, safe_json_dumps
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +109,7 @@ def save_result_to_storage(comparison_id: str, result: Dict[str, Any]) -> None:
         os.makedirs('/app/tmp', exist_ok=True)
         file_path = f'/app/tmp/{comparison_id}.json'
         with open(file_path, 'w') as f:
-            json.dump(result, f)
+            safe_json_dump(result, f)
         logger.info(f"Saved result for comparison {comparison_id}")
         
         # 更新任务状态

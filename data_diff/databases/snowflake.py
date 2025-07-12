@@ -161,7 +161,26 @@ class Snowflake(Database):
                 encryption_algorithm=serialization.NoEncryption(),
             )
 
-        self._conn = snowflake.connector.connect(schema=f'"{schema}"', **kw)
+        # 增强连接参数以提高稳定性
+        conn_params = kw.copy()
+        conn_params.update({
+            'schema': f'"{schema}"',
+            'network_timeout': 300,  # 5分钟网络超时
+            'login_timeout': 60,     # 60秒登录超时
+            'request_timeout': 600,  # 10分钟请求超时
+            'ocsp_response_cache_filename': '/tmp/snowflake_ocsp_cache',  # OCSP缓存
+            'client_session_keep_alive': True,  # 保持会话活跃
+            'client_session_keep_alive_heartbeat_frequency': 900,  # 15分钟心跳
+        })
+        
+        # 创建连接并测试
+        self._conn = snowflake.connector.connect(**conn_params)
+        
+        # 测试连接
+        cursor = self._conn.cursor()
+        cursor.execute("SELECT 1")
+        cursor.fetchone()
+        cursor.close()
 
         self.default_schema = schema
 
