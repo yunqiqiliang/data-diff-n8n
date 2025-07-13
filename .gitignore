@@ -168,3 +168,5 @@ docker-compose-local.yml
 *.crt
 *.pem
 nginx/certs/
+dev/dev.env
+dev/presto-conf/
