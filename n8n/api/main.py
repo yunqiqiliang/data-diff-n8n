@@ -5,12 +5,13 @@ Data-Diff N8N API 主应用
 
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, status, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse as FastAPIJSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse as FastAPIJSONResponse, PlainTextResponse, Response
 from starlette.responses import Response
 from pydantic import BaseModel, Field
 from typing import Dict, List, Optional, Any
 import asyncio
 import logging
+import time
 from datetime import datetime, timedelta
 import uuid
 from urllib.parse import urlparse, parse_qs
@@ -25,9 +26,27 @@ from .response_models import (
 )
 try:
     from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+    from .metrics import (
+        api_request_duration, 
+        api_request_total,
+        comparison_duration,
+        comparison_total,
+        db_query_duration,
+        comparison_differences,
+        rows_compared,
+        memory_usage_bytes,
+        cpu_usage_percent,
+        db_connection_active,
+        table_comparisons_total_gauge,
+        schema_comparisons_total_gauge
+    )
     PROMETHEUS_AVAILABLE = True
-except ImportError:
+    print("✅ Prometheus metrics loaded successfully")
+except ImportError as e:
     PROMETHEUS_AVAILABLE = False
+    print(f"❌ Failed to load Prometheus metrics: {e}")
+    import traceback
+    traceback.print_exc()
 
 from ..core import (
     ConnectionManager,
@@ -76,6 +95,50 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 添加Prometheus指标中间件
+if PROMETHEUS_AVAILABLE:
+    @app.middleware("http")
+    async def prometheus_middleware(request: Request, call_next):
+        """记录API请求的Prometheus指标"""
+        import time
+        start_time = time.time()
+        
+        try:
+            response = await call_next(request)
+            duration = time.time() - start_time
+            
+            # 记录请求指标
+            api_request_total.labels(
+                method=request.method,
+                endpoint=request.url.path,
+                status=response.status_code
+            ).inc()
+            
+            api_request_duration.labels(
+                method=request.method,
+                endpoint=request.url.path,
+                status=response.status_code
+            ).observe(duration)
+            
+            return response
+        except Exception as e:
+            duration = time.time() - start_time
+            
+            # 记录错误请求
+            api_request_total.labels(
+                method=request.method,
+                endpoint=request.url.path,
+                status=500
+            ).inc()
+            
+            api_request_duration.labels(
+                method=request.method,
+                endpoint=request.url.path,
+                status=500
+            ).observe(duration)
+            
+            raise
 
 # 包含高级路由
 app.include_router(advanced_router)
@@ -164,7 +227,7 @@ class ComparisonConfig(BaseModel):
     tolerance: Optional[float] = Field(0.001, description="数值容差")
     case_sensitive: Optional[bool] = Field(True, description="大小写敏感")
     strict_type_checking: Optional[bool] = Field(False, description="严格类型检查")
-    enable_column_statistics: Optional[bool] = Field(False, description="启用列统计")
+    enable_column_statistics: Optional[bool] = Field(True, description="启用列统计")
     enable_classification: Optional[bool] = Field(False, description="启用差异分类")
     treat_null_as_critical: Optional[bool] = Field(False, description="将NULL视为严重")
 
@@ -216,7 +279,7 @@ class NestedComparisonConfig(BaseModel):
     bisection_threshold: Optional[int] = Field(1024, description="二分法阈值")
     where_condition: Optional[str] = Field(None, description="WHERE条件")
     strict_type_checking: Optional[bool] = Field(False, description="严格类型检查")
-    enable_column_statistics: Optional[bool] = Field(False, description="启用列统计")
+    enable_column_statistics: Optional[bool] = Field(True, description="启用列统计")
     enable_classification: Optional[bool] = Field(False, description="启用差异分类")
     treat_null_as_critical: Optional[bool] = Field(False, description="将NULL视为严重")
     timeline_column: Optional[str] = Field(None, description="时间线列")
@@ -237,6 +300,7 @@ class NestedSchemaComparisonRequest(BaseModel):
     """嵌套模式比对请求模型"""
     source_config: NestedDatabaseConfig
     target_config: NestedDatabaseConfig
+    comparison_config: Optional[Dict[str, Any]] = Field(None, description="比对配置")
 
     class Config:
         extra = "allow"  # 允许额外字段
@@ -816,7 +880,7 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
             "auto_sample_threshold": int(params.get('auto_sample_threshold', 100000)),
             "enable_sampling": params.get('enable_sampling', True) if isinstance(params.get('enable_sampling'), bool) else str(params.get('enable_sampling', 'true')).lower() == 'true',
             # 添加列统计和分类参数
-            "enable_column_statistics": params.get('enable_column_statistics', False) if isinstance(params.get('enable_column_statistics'), bool) else str(params.get('enable_column_statistics', 'false')).lower() == 'true',
+            "enable_column_statistics": params.get('enable_column_statistics', True) if isinstance(params.get('enable_column_statistics'), bool) else str(params.get('enable_column_statistics', 'true')).lower() == 'true',
             "enable_classification": params.get('enable_classification', False) if isinstance(params.get('enable_classification'), bool) else str(params.get('enable_classification', 'false')).lower() == 'true',
             "treat_null_as_critical": params.get('treat_null_as_critical', False) if isinstance(params.get('treat_null_as_critical'), bool) else str(params.get('treat_null_as_critical', 'false')).lower() == 'true',
             # 添加时间线分析参数
@@ -881,24 +945,32 @@ async def compare_tables_endpoint(request: Request, background_tasks: Background
 
 @app.get("/api/v1/metrics")
 async def get_metrics():
-    """获取系统指标"""
+    """获取Prometheus格式的系统指标"""
     try:
-        # 收集各种指标
-        metrics = {
-            "timestamp": datetime.utcnow().isoformat(),
-            "comparisons": {
-                "total": 0,  # 从存储中获取
-                "today": 0,
-                "success_rate": 0.0
-            },
-            "performance": {
-                "avg_response_time": 0.0,
-                "avg_rows_per_second": 0,
-                "memory_usage": "0MB"
+        if PROMETHEUS_AVAILABLE:
+            # 返回Prometheus格式的指标
+            metrics_data = generate_latest()
+            return Response(
+                content=metrics_data,
+                media_type=CONTENT_TYPE_LATEST,
+                headers={"Content-Type": CONTENT_TYPE_LATEST}
+            )
+        else:
+            # 如果Prometheus不可用，返回JSON格式的基本指标
+            metrics = {
+                "timestamp": datetime.utcnow().isoformat(),
+                "comparisons": {
+                    "total": 0,
+                    "today": 0,
+                    "success_rate": 0.0
+                },
+                "performance": {
+                    "avg_response_time": 0.0,
+                    "avg_rows_per_second": 0,
+                    "memory_usage": "0MB"
+                }
             }
-        }
-
-        return metrics
+            return metrics
 
     except Exception as e:
         logger.error(f"Failed to get metrics: {e}")
@@ -1434,11 +1506,17 @@ async def execute_comparison_async(
         # 传递 comparison_id 给比对引擎
         comparison_config['comparison_id'] = comparison_id
         
+        # 记录开始时间
+        start_time = time.time()
+        
         result = await comparison_engine.compare_tables(
             source_config=source_config,
             target_config=target_config,
             comparison_config=comparison_config
         )
+        
+        # 记录执行时间
+        execution_time = time.time() - start_time
 
         # 直接使用字典形式处理结果，不调用可能不存在的process_result方法
         if isinstance(result, dict) and "status" in result:
@@ -1451,6 +1529,90 @@ async def execute_comparison_async(
                 "timestamp": datetime.utcnow().isoformat(),
                 "result": str(result)[:1000]  # 截断结果，避免过大
             }
+
+        # 记录Prometheus指标
+        if PROMETHEUS_AVAILABLE:
+            # 记录比对完成
+            comparison_total.labels(
+                comparison_type="table",
+                status="completed",
+                source_type=source_config.get("driver", source_config.get("database_type", "unknown")),
+                target_type=target_config.get("driver", target_config.get("database_type", "unknown"))
+            ).inc()
+            
+            # 记录执行时间
+            comparison_duration.labels(
+                comparison_type="table",
+                algorithm=comparison_config.get("algorithm", "hashdiff"),
+                status="completed",
+                source_type=source_config.get("driver", source_config.get("database_type", "unknown")),
+                target_type=target_config.get("driver", target_config.get("database_type", "unknown"))
+            ).observe(execution_time)
+            
+            # 记录行数和差异数
+            if isinstance(result, dict):
+                total_rows = result.get("metadata", {}).get("total_rows", 0)
+                diff_count = result.get("metadata", {}).get("differences_count", 0)
+                
+                if total_rows > 0:
+                    rows_compared.labels(
+                        comparison_type="table",
+                        table_name=comparison_config.get("source_table", "unknown"),
+                        database_type=source_config.get("driver", "unknown")
+                    ).observe(total_rows)
+                
+                if diff_count >= 0:
+                    comparison_differences.labels(
+                        comparison_type="table",
+                        table_name=comparison_config.get("source_table", "unknown"),
+                        database_type=source_config.get("driver", "unknown")
+                    ).observe(diff_count)
+                
+                # 记录更详细的比对指标
+                from .metrics import record_comparison_metrics, record_column_statistics
+                
+                # 准备比对配置，添加额外信息
+                enhanced_config = comparison_config.copy()
+                enhanced_config['source_type'] = source_config.get("driver", source_config.get("database_type", "unknown"))
+                enhanced_config['target_type'] = target_config.get("driver", target_config.get("database_type", "unknown"))
+                enhanced_config['execution_time'] = execution_time
+                enhanced_config['total_rows'] = total_rows
+                enhanced_config['total_differences'] = diff_count
+                
+                # 记录比对指标
+                record_comparison_metrics(result, enhanced_config)
+                
+                # 记录列统计信息（如果存在）
+                column_stats_data = None
+                
+                # 检查多个可能的位置
+                if result.get("column_statistics"):
+                    column_stats_data = result["column_statistics"]
+                elif isinstance(result, dict) and result.get("result") and isinstance(result["result"], dict):
+                    if result["result"].get("column_statistics"):
+                        column_stats_data = result["result"]["column_statistics"]
+                
+                if column_stats_data:
+                    # 从source_statistics或target_statistics中提取数据
+                    stats_to_record = {}
+                    
+                    if isinstance(column_stats_data, dict):
+                        # 优先使用source_statistics
+                        if "source_statistics" in column_stats_data:
+                            stats_to_record = column_stats_data["source_statistics"]
+                        elif "target_statistics" in column_stats_data:
+                            stats_to_record = column_stats_data["target_statistics"]
+                        else:
+                            # 如果是直接的统计数据
+                            stats_to_record = column_stats_data
+                    
+                    if stats_to_record:
+                        record_column_statistics(
+                            stats_to_record, 
+                            comparison_config.get("source_table", "unknown"),
+                            source_config.get("driver", source_config.get("database_type", "unknown"))
+                        )
+                        logger.info(f"Recorded column statistics for {len(stats_to_record)} columns")
 
         # 保存结果到临时存储
         from .utils import save_result_to_storage
@@ -1472,6 +1634,131 @@ async def execute_comparison_async(
         save_result_to_storage(comparison_id, error_result)
 
 
+async def execute_schema_comparison_async(
+    comparison_id: str,
+    source_config: Dict[str, Any],
+    target_config: Dict[str, Any],
+    source_tables: Optional[List[str]],
+    target_tables: Optional[List[str]],
+    workflow_start_time: Optional[str]
+):
+    """异步执行schema比对任务"""
+    try:
+        from .utils import save_result_to_storage, update_task_status
+        
+        global comparison_engine
+        logger.info(f"Starting async schema comparison {comparison_id}")
+        
+        # 如果启用了物化，创建任务记录
+        if comparison_engine.result_materializer and workflow_start_time:
+            task_config = {
+                'source_connection': source_config,
+                'target_connection': target_config,
+                'source_schema': source_config.get('schema', 'public'),
+                'target_schema': target_config.get('schema', 'public'),
+                'source_tables': source_tables,
+                'target_tables': target_tables,
+                'workflow_start_time': workflow_start_time,
+                'comparison_id': comparison_id,
+                'created_at': datetime.utcnow()
+            }
+            
+            # 创建任务记录
+            update_task_status(comparison_id, 'running')
+        
+        # 记录开始时间
+        start_time = time.time()
+        
+        # 执行schema比对
+        result = await comparison_engine.compare_schemas(
+            source_config=source_config,
+            target_config=target_config,
+            source_tables=source_tables,
+            target_tables=target_tables
+        )
+        
+        # 记录执行时间
+        execution_time = time.time() - start_time
+        
+        # 保存结果
+        final_result = {
+            "comparison_id": comparison_id,
+            "status": "completed",
+            "result": result,
+            "source_type": source_config.get("driver", source_config.get("database_type")),
+            "target_type": target_config.get("driver", target_config.get("database_type")),
+            "completed_at": datetime.utcnow().isoformat()
+        }
+        
+        # 记录Prometheus指标
+        if PROMETHEUS_AVAILABLE:
+            # 记录比对完成
+            comparison_total.labels(
+                comparison_type="schema",
+                status="completed",
+                source_type=source_config.get("driver", source_config.get("database_type", "unknown")),
+                target_type=target_config.get("driver", target_config.get("database_type", "unknown"))
+            ).inc()
+            
+            # 记录执行时间
+            comparison_duration.labels(
+                comparison_type="schema",
+                algorithm="schema_diff",
+                status="completed",
+                source_type=source_config.get("driver", source_config.get("database_type", "unknown")),
+                target_type=target_config.get("driver", target_config.get("database_type", "unknown"))
+            ).observe(execution_time)
+            
+            # 记录schema差异数
+            if isinstance(result, dict) and "diff" in result:
+                total_diffs = result.get("summary", {}).get("total_differences", 0)
+                if total_diffs >= 0:
+                    comparison_differences.labels(
+                        comparison_type="schema",
+                        table_name="all_tables",
+                        database_type=source_config.get("driver", "unknown")
+                    ).observe(total_diffs)
+        
+        # 物化结果
+        if comparison_engine.result_materializer and workflow_start_time:
+            try:
+                await comparison_engine.result_materializer.materialize_schema_comparison(
+                    comparison_id=comparison_id,
+                    result=result,
+                    source_config=source_config,
+                    target_config=target_config,
+                    workflow_start_time=workflow_start_time
+                )
+            except Exception as mat_error:
+                logger.error(f"Failed to materialize schema comparison result: {mat_error}")
+        
+        # 保存结果到存储
+        save_result_to_storage(comparison_id, final_result)
+        
+        # 更新任务状态
+        update_task_status(comparison_id, 'completed')
+        
+        logger.info(f"Async schema comparison {comparison_id} completed successfully")
+        
+    except Exception as e:
+        logger.error(f"Async schema comparison {comparison_id} failed: {e}", exc_info=True)
+        
+        # 保存错误结果
+        error_result = {
+            "comparison_id": comparison_id,
+            "status": "error",
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "completed_at": datetime.utcnow().isoformat()
+        }
+        
+        from .utils import save_result_to_storage
+        save_result_to_storage(comparison_id, error_result)
+        
+        # 更新任务状态
+        update_task_status(comparison_id, 'error')
+
+
 # 启动事件
 @app.on_event("startup")
 async def startup_event():
@@ -1481,6 +1768,23 @@ async def startup_event():
     # 初始化各个组件
     await config_manager.initialize()
     await connection_manager.initialize()
+    
+    # 启动指标更新任务（每分钟更新一次）
+    if PROMETHEUS_AVAILABLE:
+        from .metrics_updater import update_business_metrics_from_stats
+        
+        async def periodic_metrics_update():
+            """定期更新业务指标"""
+            while True:
+                try:
+                    await update_business_metrics_from_stats()
+                except Exception as e:
+                    logger.error(f"Failed to update business metrics: {e}")
+                await asyncio.sleep(60)  # 每分钟更新一次
+        
+        # 创建后台任务
+        asyncio.create_task(periodic_metrics_update())
+        logger.info("Started periodic metrics update task")
 
     logger.info("Data-Diff N8N API started successfully")
 
@@ -1579,7 +1883,7 @@ async def compare_tables_nested_endpoint(request: NestedComparisonRequest, backg
             "where_condition": request.comparison_config.where_condition,
             "strict_type_checking": request.comparison_config.strict_type_checking or False,
             # 添加新功能参数
-            "enable_column_statistics": request.comparison_config.enable_column_statistics or False,
+            "enable_column_statistics": request.comparison_config.enable_column_statistics if request.comparison_config.enable_column_statistics is not None else True,
             "enable_classification": request.comparison_config.enable_classification or False,
             "treat_null_as_critical": request.comparison_config.treat_null_as_critical or False,
             "timeline_column": request.comparison_config.timeline_column,
@@ -1632,7 +1936,7 @@ async def compare_tables_nested_endpoint(request: NestedComparisonRequest, backg
 
 
 @app.post("/api/v1/compare/schemas/nested", response_model=Dict[str, Any])
-async def compare_schemas_nested_endpoint(request: NestedSchemaComparisonRequest):
+async def compare_schemas_nested_endpoint(request: NestedSchemaComparisonRequest, background_tasks: BackgroundTasks):
     """处理嵌套JSON结构的模式比对请求"""
     try:
         logger.info(f"收到嵌套结构模式比对请求")
@@ -1674,18 +1978,69 @@ async def compare_schemas_nested_endpoint(request: NestedSchemaComparisonRequest
 
         logger.info(f"转换后的配置 - 源: {source_db_config['driver']}, 目标: {target_db_config['driver']}")
 
-        # 直接执行模式比对（不需要异步，因为模式比对通常很快）
-        result = await comparison_engine.compare_schemas(
-            source_config=source_db_config,
-            target_config=target_db_config
-        )
+        # 获取比对配置
+        comparison_config = request.comparison_config or {}
+        
+        # 从 comparison_config 中提取表过滤参数
+        source_tables = comparison_config.get('source_tables', None)
+        target_tables = comparison_config.get('target_tables', None)
+        
+        # 检查是否需要物化结果（如果需要，则使用异步任务）
+        materialize_results = comparison_config.get('materialize_results', True)
+        workflow_start_time = comparison_config.get('workflow_start_time', None)
+        
+        if materialize_results and workflow_start_time:
+            # 异步模式：创建任务并返回任务ID
+            comparison_id = str(uuid.uuid4())
+            
+            # 准备异步任务配置
+            task_config = {
+                'source_connection': source_db_config,
+                'target_connection': target_db_config,
+                'source_schema': source_db_config.get('schema', 'public'),
+                'target_schema': target_db_config.get('schema', 'public'),
+                'source_tables': source_tables,
+                'target_tables': target_tables,
+                'workflow_start_time': workflow_start_time
+            }
+            
+            # 异步执行schema比对
+            background_tasks.add_task(
+                execute_schema_comparison_async,
+                comparison_id,
+                source_db_config,
+                target_db_config,
+                source_tables,
+                target_tables,
+                workflow_start_time
+            )
+            
+            logger.info(f"模式比对任务已加入队列: {comparison_id}")
+            
+            return {
+                "comparison_id": comparison_id,
+                "status": "started",
+                "message": "Schema comparison task started"
+            }
+        else:
+            # 同步模式：直接执行并返回结果
+            # 生成一个comparison_id，即使是同步模式
+            comparison_id = str(uuid.uuid4())
+            
+            result = await comparison_engine.compare_schemas(
+                source_config=source_db_config,
+                target_config=target_db_config,
+                source_tables=source_tables,
+                target_tables=target_tables
+            )
 
-        return {
-            "status": "completed",
-            "result": result,
-            "source_type": source_db_config["driver"],
-            "target_type": target_db_config["driver"]
-        }
+            return {
+                "comparison_id": comparison_id,
+                "status": "completed",
+                "result": result,
+                "source_type": source_db_config["driver"],
+                "target_type": target_db_config["driver"]
+            }
 
     except ValueError as ve:
         logger.error(f"嵌套模式比对请求参数错误: {ve}")

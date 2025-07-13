@@ -57,28 +57,8 @@ export class DataComparisonDualInput implements INodeType {
 						description: 'Compare table structures, columns, and data types between databases',
 						action: 'Compare database schemas',
 					},
-					{
-						name: 'Get Comparison Result',
-						value: 'getComparisonResult',
-						description: 'Retrieve results from an asynchronous comparison using comparison ID',
-						action: 'Get comparison result by ID',
-					},
 				],
 				default: 'compareTable',
-			},
-			{
-				displayName: 'Comparison ID',
-				name: 'comparisonId',
-				type: 'string',
-				default: '',
-				placeholder: 'e.g., 02f29186-e0c9-464c-8e7e-7ec66ac7c24d',
-				description: 'The ID of the comparison task to get results for',
-				displayOptions: {
-					show: {
-						operation: ['getComparisonResult'],
-					},
-				},
-				required: true,
 			},
 			{
 				displayName: 'Configuration Mode',
@@ -786,38 +766,44 @@ export class DataComparisonDualInput implements INodeType {
 					},
 				],
 			},
+			// Schema 比对的高级选项
+			{
+				displayName: 'Schema Comparison Options',
+				name: 'schemaAdvancedOptions',
+				type: 'collection',
+				placeholder: 'Add Option',
+				default: {},
+				displayOptions: {
+					show: {
+						operation: ['compareSchema'],
+					},
+				},
+				options: [
+					{
+						displayName: 'Result Materialization',
+						name: 'resultMaterialization',
+						type: 'collection',
+						placeholder: 'Add Materialization Settings',
+						default: {},
+						description: 'Configure how comparison results are stored in database',
+						options: [
+							{
+								displayName: 'Enable Materialization',
+								name: 'materializeResults',
+								type: 'boolean',
+								default: true,
+								description: 'Store comparison results in PostgreSQL database for historical analysis',
+							},
+						],
+					},
+				],
+			},
 		],
 	};
 
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const returnData: INodeExecutionData[] = [];
 		const operation = this.getNodeParameter('operation', 0) as string;
-		
-		// 处理获取比对结果的操作
-		if (operation === 'getComparisonResult') {
-			const comparisonId = this.getNodeParameter('comparisonId', 0) as string;
-			try {
-				const result = await DataComparisonDualInput.getComparisonResult(comparisonId);
-				returnData.push({
-					json: ensureSerializable({
-						success: true,
-						operation,
-						comparisonId,
-						result,
-					}),
-				});
-			} catch (error: any) {
-				returnData.push({
-					json: {
-						success: false,
-						operation,
-						comparisonId,
-						error: error?.message || 'Failed to get comparison result',
-					},
-				});
-			}
-			return [returnData];
-		}
 		
 		// 对于比对操作，需要两个输入
 		let sourceItems: INodeExecutionData[] = [];
@@ -987,7 +973,7 @@ export class DataComparisonDualInput implements INodeType {
 					console.log('[DataComparisonDualInput] Async comparison started with ID:', startResult.comparison_id);
 					result = {
 						...startResult,
-						message: 'Comparison task started. Use "Get Comparison Result" operation to retrieve results.',
+						message: 'Comparison task started. Use the Data Comparison Result node to retrieve results.',
 						async: true
 					};
 				} else {
@@ -995,14 +981,40 @@ export class DataComparisonDualInput implements INodeType {
 					result = startResult;
 				}
 			} else if (operation === 'compareSchema') {
+				// 获取 schema 比对的高级选项
+				const schemaAdvancedOptions = this.getNodeParameter('schemaAdvancedOptions', 0, {}) as IDataObject;
+				
 				// 构建模式比对请求参数
 				const requestData = {
 					source_config: DataComparisonDualInput.convertToApiConfig(sourceConfig),
 					target_config: DataComparisonDualInput.convertToApiConfig(targetConfig),
+					comparison_config: {
+						// 添加要比对的特定表（如果有的话）
+						source_tables: sourceTable ? [sourceTable] : undefined,
+						target_tables: targetTable ? [targetTable] : undefined,
+						// 结果物化选项
+						materialize_results: (schemaAdvancedOptions.resultMaterialization as IDataObject)?.materializeResults !== false,
+						// 添加 workflow_start_time 用于异步处理
+						workflow_start_time: new Date().toISOString(),
+					}
 				};
 				
-				// 调用模式比对 API
-				result = await DataComparisonDualInput.callComparisonAPI(requestData, 'schemas');
+				// 调用模式比对 API 启动异步任务
+				console.log('[DataComparisonDualInput] Starting async schema comparison with request:', JSON.stringify(requestData, null, 2));
+				const startResult = await DataComparisonDualInput.callComparisonAPI(requestData, 'schemas');
+				
+				// 检查是否返回了异步任务信息
+				if (startResult.comparison_id && startResult.status === 'started') {
+					console.log('[DataComparisonDualInput] Async schema comparison started with ID:', startResult.comparison_id);
+					result = {
+						...startResult,
+						message: 'Schema comparison task started. Use the Data Comparison Result node to retrieve results.',
+						async: true
+					};
+				} else {
+					// 兼容同步返回的情况
+					result = startResult;
+				}
 			}
 			
 			// 构建输出
@@ -1034,7 +1046,7 @@ export class DataComparisonDualInput implements INodeType {
 							},
 						},
 						next_steps: {
-							description: 'Use the comparison_id with "Get Comparison Result" operation to retrieve results',
+							description: 'Use the comparison_id with Data Comparison Result node to retrieve results',
 							check_interval_seconds: 5,
 							max_wait_time_seconds: 300,
 						},
@@ -1356,34 +1368,6 @@ export class DataComparisonDualInput implements INodeType {
 			}
 			
 			throw new Error(errorMessage);
-		}
-		
-		return data;
-	}
-	
-	// 获取比对结果
-	private static async getComparisonResult(comparisonId: string): Promise<any> {
-		const fetch = require('node-fetch');
-		const apiUrl = `http://data-diff-api:8000/api/v1/compare/results/${comparisonId}`;
-		
-		const response = await fetch(apiUrl, {
-			method: 'GET',
-			headers: { 'Content-Type': 'application/json' },
-		});
-		
-		const data = await response.json();
-		
-		if (!response.ok) {
-			// 如果是404，可能是任务不存在
-			if (response.status === 404) {
-				throw new Error(`Comparison ID '${comparisonId}' not found. The comparison task may not exist or has expired.`);
-			}
-			throw new Error(data.detail || data.message || 'Failed to get comparison result');
-		}
-		
-		// 检查任务状态
-		if (data.status === 'pending' || data.status === 'running') {
-			console.log(`[DataComparisonDualInput] Comparison ${comparisonId} is still ${data.status}`);
 		}
 		
 		return data;

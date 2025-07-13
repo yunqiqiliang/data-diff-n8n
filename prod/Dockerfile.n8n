@@ -1,0 +1,51 @@
+# N8N with custom Data-Diff nodes
+FROM n8nio/n8n:latest
+
+USER root
+
+# 安装构建依赖
+RUN apk add --no-cache \
+    python3 \
+    py3-pip \
+    g++ \
+    make \
+    nodejs-npm
+
+# 创建自定义节点目录
+RUN mkdir -p /home/node/.n8n/custom/node_modules/@n8n/data-diff-nodes && \
+    chown -R node:node /home/node/.n8n
+
+# 切换到 node 用户
+USER node
+
+# 设置工作目录
+WORKDIR /home/node/.n8n/custom/node_modules/@n8n/data-diff-nodes
+
+# 复制 package.json 和 package-lock.json
+COPY --chown=node:node n8n/package*.json ./
+
+# 安装依赖
+RUN npm ci --only=production
+
+# 复制源代码
+COPY --chown=node:node n8n/src ./src
+COPY --chown=node:node n8n/tsconfig.json ./
+
+# 构建 TypeScript
+RUN npm run build
+
+# 复制 package.dist.json 为 package.json（用于运行时）
+COPY --chown=node:node n8n/package.dist.json ./package.json
+
+# 切换回根目录
+WORKDIR /home/node
+
+# 暴露端口
+EXPOSE 5678
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD node -e "require('http').get('http://localhost:5678/healthz', (res) => { process.exit(res.statusCode === 200 ? 0 : 1); })"
+
+# 使用 n8n 的默认入口点
+ENTRYPOINT ["tini", "--", "n8n"]

@@ -32,9 +32,11 @@
       "credentials/DatabaseConnectorCredentials.credentials.js"
     ],
     "nodes": [
+      "nodes/DataComparison/DataComparisonDualInput.node.js",
+      "nodes/DataComparison/DataComparisonResult.node.js",
+      "nodes/DataComparison/DataComparisonMaintenance.node.js",
       "nodes/ClickzettaConnector/ClickzettaConnector.node.js",
-      "nodes/DatabaseConnector/DatabaseConnector.node.js",
-      "nodes/DataComparison/DataComparison.node.js"
+      "nodes/DatabaseConnector/DatabaseConnector.node.js"
     ]
   },
   "dependencies": {

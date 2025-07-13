@@ -189,12 +189,20 @@ class ComparisonEngine:
     async def compare_schemas(
         self,
         source_config: Dict[str, Any],
-        target_config: Dict[str, Any]
+        target_config: Dict[str, Any],
+        source_tables: Optional[List[str]] = None,
+        target_tables: Optional[List[str]] = None
     ) -> Dict[str, Any]:
         """
         执行模式比对
+        
+        Args:
+            source_config: 源数据库配置
+            target_config: 目标数据库配置
+            source_tables: 要比对的源表列表（可选，如果不指定则比对所有表）
+            target_tables: 要比对的目标表列表（可选，如果不指定则比对所有表）
         """
-        self.logger.info("Starting schema comparison...")
+        self.logger.info(f"Starting schema comparison... source_tables={source_tables}, target_tables={target_tables}")
         try:
             # 创建连接
             source_conn_id = await self.connection_manager.create_connection(source_config)
@@ -208,8 +216,8 @@ class ComparisonEngine:
             target_connection_string = self.connection_manager._build_connection_string(target_config_obj)
 
             # 获取实际的 schema 信息
-            source_schema = await self._get_database_schema(source_connection_string, source_config_obj)
-            target_schema = await self._get_database_schema(target_connection_string, target_config_obj)
+            source_schema = await self._get_database_schema(source_connection_string, source_config_obj, source_tables)
+            target_schema = await self._get_database_schema(target_connection_string, target_config_obj, target_tables)
 
             # 比较 schema
             diff_result = self._compare_schemas(source_schema, target_schema)
@@ -235,19 +243,23 @@ class ComparisonEngine:
             }
             raise Exception(f"{str(e)} (详细信息: {detailed_error['error_type']})")
 
-    async def _get_database_schema(self, db_connection_string: str, config: Dict[str, Any]) -> Dict[str, Any]:
-        """获取数据库模式信息 - 使用连接字符串"""
+    async def _get_database_schema(self, db_connection_string: str, config: Dict[str, Any], table_filter: Optional[List[str]] = None) -> Dict[str, Any]:
+        """获取数据库模式信息 - 使用连接字符串
+        
+        Args:
+            db_connection_string: 数据库连接字符串
+            config: 数据库配置
+            table_filter: 要过滤的表列表（可选）
+        """
         try:
-            schema_name = config.get("schema", "public")
-
             # 根据数据库类型获取schema
             if config.get("database_type") == "postgresql" or config.get("driver") == "postgresql":
-                return await self._get_postgresql_schema(db_connection_string, config)
+                return await self._get_postgresql_schema(db_connection_string, config, table_filter)
             elif config.get("database_type") == "clickzetta" or config.get("driver") == "clickzetta":
-                return await self._get_clickzetta_schema(db_connection_string, config)
+                return await self._get_clickzetta_schema(db_connection_string, config, table_filter)
             else:
                 # 通用方法
-                return await self._get_generic_schema(db_connection_string, config)
+                return await self._get_generic_schema(db_connection_string, config, table_filter)
         except Exception as e:
             self.logger.error(f"Failed to get schema: {e}")
             return {
@@ -258,11 +270,11 @@ class ComparisonEngine:
                 "error": str(e)
             }
 
-    async def _get_postgresql_schema(self, db_connection_string: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    async def _get_postgresql_schema(self, db_connection_string: str, config: Dict[str, Any], table_filter: Optional[List[str]] = None) -> Dict[str, Any]:
         """获取PostgreSQL数据库模式 - 完全参考表比对的成功实现方式"""
         try:
             schema_name = config.get("schema", "public")
-            self.logger.info(f"Getting PostgreSQL schema for {schema_name}")
+            self.logger.info(f"Getting PostgreSQL schema for {schema_name}, table_filter={table_filter}")
 
             # 检查是否有data-diff库
             if not HAS_DATA_DIFF:
@@ -275,32 +287,74 @@ class ComparisonEngine:
             indexes = {}
             constraints = {}
 
-            # 步骤1: 直接通过尝试连接常见表名来发现表
-            # 避免复杂的 information_schema 连接问题
-            self.logger.info("Discovering tables by trying to connect to common table names...")
-            common_tables = ['users', 'orders', 'products', 'invoices', 'accounts', 'people', 'reviews']
-            for table_name in common_tables:
+            # 步骤1: 获取表列表
+            if table_filter:
+                # 如果提供了表过滤器，只使用这些表
+                self.logger.info(f"Using table filter: {table_filter}")
+                tables = table_filter
+            else:
+                # 否则从数据库查询所有表
+                self.logger.info(f"Querying all tables from PostgreSQL schema: {schema_name}")
                 try:
-                    # 使用与表比对完全相同的方式尝试连接
-                    table_segment = connect_to_table(
-                        db_info=db_connection_string,
-                        table_name=table_name,
-                        key_columns=("id",),
-                        thread_count=1
-                    )
-                    # 如果连接成功，添加到表列表（不进行count测试）
-                    tables.append(table_name)
-                    self.logger.info(f"✅ Found table: {table_name}")
-                    # 立即关闭连接以避免事务问题
-                    try:
-                        if hasattr(table_segment, 'close'):
-                            table_segment.close()
-                        elif hasattr(table_segment, 'database') and hasattr(table_segment.database, 'close'):
-                            table_segment.database.close()
-                    except Exception:
-                        pass
-                except Exception:
-                    continue
+                    # 使用 psycopg2 直接查询
+                    import psycopg2
+                    from urllib.parse import urlparse
+                    
+                    # 解析连接字符串
+                    parsed = urlparse(db_connection_string)
+                    conn_params = {
+                        'host': parsed.hostname,
+                        'port': parsed.port or 5432,
+                        'user': parsed.username,
+                        'password': parsed.password,
+                        'database': parsed.path[1:]  # Remove leading '/'
+                    }
+                    
+                    conn = psycopg2.connect(**conn_params)
+                    cursor = conn.cursor()
+                    
+                    # 查询指定 schema 中的所有表
+                    cursor.execute("""
+                        SELECT table_name 
+                        FROM information_schema.tables 
+                        WHERE table_schema = %s 
+                        AND table_type = 'BASE TABLE'
+                        ORDER BY table_name
+                    """, (schema_name,))
+                    
+                    tables = [row[0] for row in cursor.fetchall()]
+                    self.logger.info(f"Found {len(tables)} tables in schema {schema_name}: {tables}")
+                    
+                    cursor.close()
+                    conn.close()
+                    
+                except Exception as e:
+                    self.logger.warning(f"Failed to query tables from information_schema: {e}")
+                    # 如果查询失败，回退到尝试连接常见表名
+                    self.logger.info("Falling back to discovering tables by connection attempts...")
+                    tables_to_check = ['users', 'orders', 'products', 'invoices', 'accounts', 'people', 'reviews']
+                    tables = []
+                    
+                    for table_name in tables_to_check:
+                        try:
+                            table_segment = connect_to_table(
+                                db_info=db_connection_string,
+                                table_name=table_name,
+                                key_columns=("id",),
+                                thread_count=1
+                            )
+                            tables.append(table_name)
+                            self.logger.info(f"✅ Found table: {table_name}")
+                            # 立即关闭连接
+                            try:
+                                if hasattr(table_segment, 'close'):
+                                    table_segment.close()
+                                elif hasattr(table_segment, 'database') and hasattr(table_segment.database, 'close'):
+                                    table_segment.database.close()
+                            except Exception:
+                                pass
+                        except Exception:
+                            continue
 
             # 步骤2: 为每个表获取详细的模式信息
             for table_name in tables:
@@ -371,11 +425,11 @@ class ComparisonEngine:
             self.logger.error(f"Failed to get PostgreSQL schema: {e}")
             raise
 
-    async def _get_clickzetta_schema(self, db_connection_string: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    async def _get_clickzetta_schema(self, db_connection_string: str, config: Dict[str, Any], table_filter: Optional[List[str]] = None) -> Dict[str, Any]:
         """获取Clickzetta数据库模式 - 完全参考表比对的成功实现方式"""
         try:
             schema_name = config.get("schema", "public")
-            self.logger.info(f"Getting Clickzetta schema for {schema_name}")
+            self.logger.info(f"Getting Clickzetta schema for {schema_name}, table_filter={table_filter}")
 
             # 检查是否有data-diff库
             if not HAS_DATA_DIFF:
@@ -388,63 +442,70 @@ class ComparisonEngine:
             indexes = {}
             constraints = {}
 
-            # 步骤1: 连接到system.tables获取表列表
-            # 完全参考表比对的成功方式
-            try:
-                self.logger.info(f"🔗 Connecting to information_schema.tables with connection string...")
-
-                # 使用与表比对完全相同的方式连接
-                system_table_segment = connect_to_table(
-                    db_info=db_connection_string,
-                    table_name="information_schema.tables",
-                    key_columns=("table_name",),
-                    thread_count=1
-                )
-
-                # 立即验证连接 - 就像表比对中的验证方式
+            # 步骤1: 获取表列表
+            if table_filter:
+                # 如果提供了表过滤器，只使用这些表
+                self.logger.info(f"Using table filter: {table_filter}")
+                tables = table_filter
+            else:
+                # 否则从数据库查询所有表
                 try:
-                    test_count = system_table_segment.count()
-                    self.logger.info(f"✅ System tables connection verified - row count: {test_count}")
-                except Exception as test_error:
-                    self.logger.error(f"❌ System tables connection failed: {test_error}")
-                    raise Exception(f"无法连接到information_schema.tables: {str(test_error)}")
+                    self.logger.info(f"🔗 Connecting to information_schema.tables with connection string...")
 
-                # 使用底层数据库连接执行查询
-                database_obj = system_table_segment.database
+                    # 使用与表比对完全相同的方式连接
+                    system_table_segment = connect_to_table(
+                        db_info=db_connection_string,
+                        table_name="information_schema.tables",
+                        key_columns=("table_name",),
+                        thread_count=1
+                    )
 
-                # 构建查询获取表列表
-                tables_query = f"""
-                    SELECT table_name as table_name
-                    FROM information_schema.tables
-                    WHERE table_schema = '{schema_name}' and table_type = 'MANAGED_TABLE'
-                    ORDER BY table_name
-                """
-
-                # 执行查询
-                result = database_obj.query(tables_query, list)
-                tables = [row[0] for row in result]
-                self.logger.info(f"✅ Found {len(tables)} tables in schema {schema_name}: {tables}")
-
-            except Exception as e:
-                self.logger.error(f"Failed to get table list from information_schema.tables: {e}")
-                # 如果无法从system.tables获取表列表，尝试连接到一些常见的表
-                self.logger.info("Trying to find tables by connecting to common table names...")
-                common_tables = ['users', 'orders', 'products', 'invoices', 'accounts', 'people', 'reviews']
-                for table_name in common_tables:
+                    # 立即验证连接 - 就像表比对中的验证方式
                     try:
-                        # 使用与表比对完全相同的方式尝试连接
-                        table_segment = connect_to_table(
-                            db_info=db_connection_string,
-                            table_name=table_name,
-                            key_columns=("id",),
-                            thread_count=1
-                        )
-                        # 如果连接成功，添加到表列表
-                        table_segment.count()  # 测试连接
-                        tables.append(table_name)
-                        self.logger.info(f"✅ Found table: {table_name}")
-                    except Exception:
-                        continue
+                        test_count = system_table_segment.count()
+                        self.logger.info(f"✅ System tables connection verified - row count: {test_count}")
+                    except Exception as test_error:
+                        self.logger.error(f"❌ System tables connection failed: {test_error}")
+                        raise Exception(f"无法连接到information_schema.tables: {str(test_error)}")
+
+                    # 使用底层数据库连接执行查询
+                    database_obj = system_table_segment.database
+
+                    # 构建查询获取表列表
+                    tables_query = f"""
+                        SELECT table_name as table_name
+                        FROM information_schema.tables
+                        WHERE table_schema = '{schema_name}' and table_type = 'MANAGED_TABLE'
+                        ORDER BY table_name
+                    """
+
+                    # 执行查询
+                    result = database_obj.query(tables_query, list)
+                    tables = [row[0] for row in result]
+                    self.logger.info(f"✅ Found {len(tables)} tables in schema {schema_name}: {tables}")
+
+                except Exception as e:
+                    self.logger.error(f"Failed to get table list from information_schema.tables: {e}")
+                    # 如果无法从system.tables获取表列表，尝试连接到一些常见的表
+                    self.logger.info("Trying to find tables by connecting to common table names...")
+                    tables_to_check = ['users', 'orders', 'products', 'invoices', 'accounts', 'people', 'reviews']
+                    tables = []
+                    
+                    for table_name in tables_to_check:
+                        try:
+                            # 使用与表比对完全相同的方式尝试连接
+                            table_segment = connect_to_table(
+                                db_info=db_connection_string,
+                                table_name=table_name,
+                                key_columns=("id",),
+                                thread_count=1
+                            )
+                            # 如果连接成功，添加到表列表
+                            table_segment.count()  # 测试连接
+                            tables.append(table_name)
+                            self.logger.info(f"✅ Found table: {table_name}")
+                        except Exception:
+                            continue
 
             # 步骤2: 为每个表获取详细的模式信息
             for table_name in tables:
@@ -466,14 +527,34 @@ class ComparisonEngine:
                     # 转换格式
                     table_columns = []
                     for col_name, col_info in table_schema.items():
-                        # 处理Clickzetta/ClickHouse的nullable类型
-                        data_type = getattr(col_info, 'data_type', str(col_info))
-                        nullable = 'Nullable' in data_type
-                        if nullable:
-                            # 从 Nullable(Int32) 中提取 Int32
-                            clean_type = data_type.replace('Nullable(', '').replace(')', '')
+                        # 处理Clickzetta的特殊格式
+                        data_type_raw = getattr(col_info, 'data_type', str(col_info))
+                        
+                        # 如果是元组的字符串表示，提取类型名称
+                        if isinstance(data_type_raw, str) and data_type_raw.startswith("('"):
+                            # 格式如: "('id', 'INT', None, None, None)"
+                            try:
+                                # 解析元组字符串
+                                import ast
+                                parsed = ast.literal_eval(data_type_raw)
+                                if isinstance(parsed, tuple) and len(parsed) >= 2:
+                                    clean_type = parsed[1]  # 第二个元素是类型名称
+                                else:
+                                    clean_type = data_type_raw
+                            except:
+                                clean_type = data_type_raw
                         else:
-                            clean_type = data_type
+                            # 处理标准格式
+                            data_type = str(data_type_raw)
+                            nullable = 'Nullable' in data_type
+                            if nullable:
+                                # 从 Nullable(Int32) 中提取 Int32
+                                clean_type = data_type.replace('Nullable(', '').replace(')', '')
+                            else:
+                                clean_type = data_type
+
+                        # 对于Clickzetta，nullable信息可能不准确，默认设为False
+                        nullable = getattr(col_info, 'nullable', False)
 
                         table_columns.append({
                             "name": col_name,
@@ -516,11 +597,11 @@ class ComparisonEngine:
             self.logger.error(f"Failed to get Clickzetta schema: {e}")
             raise
 
-    async def _get_generic_schema(self, db_connection_string: str, config: Dict[str, Any]) -> Dict[str, Any]:
+    async def _get_generic_schema(self, db_connection_string: str, config: Dict[str, Any], table_filter: Optional[List[str]] = None) -> Dict[str, Any]:
         """获取通用数据库模式 - 使用连接字符串"""
         try:
             schema_name = config.get("schema", "public")
-            self.logger.info(f"Getting generic schema for {schema_name}")
+            self.logger.info(f"Getting generic schema for {schema_name}, table_filter={table_filter}")
 
             # 通用的模式获取逻辑
             return {
@@ -535,11 +616,108 @@ class ComparisonEngine:
             self.logger.error(f"Failed to get generic schema: {e}")
             raise
 
+    def _normalize_table_name(self, table_name: str) -> str:
+        """标准化表名，去掉schema前缀"""
+        # 如果表名包含点号，取最后一部分作为表名
+        if '.' in table_name:
+            return table_name.split('.')[-1]
+        return table_name
+    
+    def _normalize_data_type(self, data_type: str) -> str:
+        """标准化数据类型名称，用于跨数据库比较
+        
+        基于ClickZetta的类型系统，将其他数据库类型映射到ClickZetta支持的类型
+        """
+        # 转换为大写（ClickZetta使用大写）
+        normalized = data_type.upper().strip()
+        
+        # 移除精度信息以便比较基础类型
+        base_type = normalized.split('(')[0] if '(' in normalized else normalized
+        
+        # 映射到ClickZetta的标准类型
+        type_mappings = {
+            # PostgreSQL -> ClickZetta 整数类型映射
+            'INTEGER': 'INT',
+            'INT4': 'INT',
+            'INT2': 'SMALLINT',
+            'INT8': 'BIGINT',
+            'SMALLINT': 'SMALLINT',
+            'BIGINT': 'BIGINT',
+            'SERIAL': 'INT',
+            'BIGSERIAL': 'BIGINT',
+            'SMALLSERIAL': 'SMALLINT',
+            
+            # ClickZetta的显式位宽类型
+            'INT8': 'TINYINT',      # 8-bit
+            'INT16': 'SMALLINT',    # 16-bit
+            'INT32': 'INT',         # 32-bit
+            'INT64': 'BIGINT',      # 64-bit
+            
+            # 浮点类型映射
+            'REAL': 'FLOAT',
+            'FLOAT4': 'FLOAT',
+            'FLOAT32': 'FLOAT',
+            'DOUBLE PRECISION': 'DOUBLE',
+            'FLOAT8': 'DOUBLE',
+            'FLOAT64': 'DOUBLE',
+            
+            # 字符串类型映射
+            'CHARACTER VARYING': 'STRING',
+            'VARCHAR': 'STRING',
+            'CHARACTER': 'STRING',
+            'CHAR': 'STRING',
+            'TEXT': 'STRING',
+            
+            # 布尔类型映射
+            'BOOL': 'BOOLEAN',
+            
+            # 时间类型映射
+            'TIMESTAMP WITHOUT TIME ZONE': 'TIMESTAMP',
+            'TIMESTAMP WITH TIME ZONE': 'TIMESTAMP_LTZ',
+            'TIMESTAMPTZ': 'TIMESTAMP_LTZ',
+            'DATETIME': 'TIMESTAMP',
+            'DATE': 'DATE',
+            
+            # 数值类型映射
+            'NUMERIC': 'DECIMAL',
+            'DECIMAL': 'DECIMAL',
+            'MONEY': 'DECIMAL',  # PostgreSQL的money类型映射到DECIMAL
+            
+            # JSON类型
+            'JSON': 'JSON',
+            'JSONB': 'JSON',
+            
+            # 二进制类型
+            'BYTEA': 'BINARY',
+            'BLOB': 'BINARY',
+        }
+        
+        # 特殊处理：如果是DECIMAL类型，保留精度信息
+        if base_type == 'DECIMAL' or base_type == 'NUMERIC':
+            if '(' in normalized:
+                # 对于money类型，ClickZetta通常使用DECIMAL(19,2)
+                if 'MONEY' in data_type.upper():
+                    return 'DECIMAL(19,2)'
+                return 'DECIMAL'  # 保持DECIMAL但忽略精度差异
+            return 'DECIMAL'
+        
+        # 返回映射后的类型，如果没有映射则返回原始的基础类型
+        return type_mappings.get(base_type, base_type)
+
     def _compare_schemas(self, source_schema: Dict[str, Any], target_schema: Dict[str, Any]) -> Dict[str, Any]:
         """比较两个数据库模式"""
         try:
-            source_tables = set(source_schema.get("tables", []))
-            target_tables = set(target_schema.get("tables", []))
+            # 获取原始表名列表
+            source_tables_raw = source_schema.get("tables", [])
+            target_tables_raw = target_schema.get("tables", [])
+            
+            # 创建标准化表名到原始表名的映射
+            source_table_map = {self._normalize_table_name(t): t for t in source_tables_raw}
+            target_table_map = {self._normalize_table_name(t): t for t in target_tables_raw}
+            
+            # 使用标准化的表名进行比较
+            source_tables = set(source_table_map.keys())
+            target_tables = set(target_table_map.keys())
 
             # 表级别的差异
             tables_only_in_source = list(source_tables - target_tables)
@@ -550,9 +728,13 @@ class ComparisonEngine:
             column_diffs = {}
             type_diffs = {}
 
-            for table in common_tables:
-                source_cols = source_schema.get("columns", {}).get(table, [])
-                target_cols = target_schema.get("columns", {}).get(table, [])
+            for normalized_table in common_tables:
+                # 获取原始表名
+                source_table = source_table_map[normalized_table]
+                target_table = target_table_map[normalized_table]
+                
+                source_cols = source_schema.get("columns", {}).get(source_table, [])
+                target_cols = target_schema.get("columns", {}).get(target_table, [])
 
                 # 转换为字典形式便于比较
                 source_col_dict = {col["name"]: col for col in source_cols}
@@ -567,7 +749,7 @@ class ComparisonEngine:
                 common_cols = list(source_col_names & target_col_names)
 
                 if cols_only_in_source or cols_only_in_target:
-                    column_diffs[table] = {
+                    column_diffs[normalized_table] = {
                         "columns_only_in_source": cols_only_in_source,
                         "columns_only_in_target": cols_only_in_target,
                     }
@@ -577,7 +759,12 @@ class ComparisonEngine:
                 for col in common_cols:
                     source_type = source_col_dict[col]["type"]
                     target_type = target_col_dict[col]["type"]
-                    if source_type != target_type:
+                    
+                    # 标准化类型名称进行比较
+                    source_type_normalized = self._normalize_data_type(source_type)
+                    target_type_normalized = self._normalize_data_type(target_type)
+                    
+                    if source_type_normalized != target_type_normalized:
                         type_changes.append({
                             "column": col,
                             "source_type": source_type,
@@ -585,7 +772,7 @@ class ComparisonEngine:
                         })
 
                 if type_changes:
-                    type_diffs[table] = type_changes
+                    type_diffs[normalized_table] = type_changes
 
             return {
                 "tables_only_in_source": tables_only_in_source,

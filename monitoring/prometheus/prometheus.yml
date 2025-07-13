@@ -16,11 +16,11 @@ scrape_configs:
       - targets: ['localhost:9090']
 
   # Data-Diff API 服务监控
-  - job_name: 'data-diff-api'
+  - job_name: 'datadiff-api'
     static_configs:
       - targets: ['data-diff-api:8000']
-    metrics_path: '/metrics'
-    scrape_interval: 30s
+    metrics_path: '/api/v1/metrics'
+    scrape_interval: 60s  # 1分钟刷新一次
 
   # PostgreSQL 数据库监控（如果有 postgres_exporter）
   - job_name: 'postgres'

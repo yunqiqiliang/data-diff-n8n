@@ -1,0 +1,62 @@
+# 使用 Python 3.11 slim 作为基础镜像
+FROM python:3.11-slim
+
+# 设置工作目录
+WORKDIR /app
+
+# 设置环境变量
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# 安装系统依赖
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    git \
+    curl \
+    libpq-dev \
+    python3-dev \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# 设置 pip 使用阿里云镜像源 - 禁用代理
+RUN NO_PROXY=* no_proxy=* pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+
+# 安装 Poetry - 禁用代理
+RUN NO_PROXY=* no_proxy=* pip install --upgrade pip setuptools wheel poetry
+
+# 配置 Poetry（不创建虚拟环境，直接安装到系统）
+RUN poetry config virtualenvs.create false
+
+# 复制依赖文件
+COPY pyproject.toml poetry.lock ./
+
+# 配置 Poetry 超时时间
+ENV POETRY_REQUESTS_TIMEOUT=300
+ENV POETRY_PYPI_MIRROR_URL=https://mirrors.aliyun.com/pypi/simple/
+
+# 安装 Python 依赖 - 禁用代理
+RUN NO_PROXY=* no_proxy=* poetry install --only main --no-root --no-interaction --no-ansi -vvv
+
+# 复制项目源码
+COPY data_diff/ ./data_diff/
+COPY n8n/ ./n8n/
+
+# 复制容器启动脚本
+COPY docker-start.sh ./docker-start.sh
+RUN chmod +x ./docker-start.sh
+
+# 创建日志目录
+RUN mkdir -p /app/logs
+
+# 暴露端口
+EXPOSE 8000
+
+# 健康检查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# 使用启动脚本作为入口点
+CMD ["./docker-start.sh"]

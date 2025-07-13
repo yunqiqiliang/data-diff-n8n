@@ -122,19 +122,136 @@ def save_result_to_storage(comparison_id: str, result: Dict[str, Any]) -> None:
 
 def get_result_from_storage(comparison_id: str) -> Optional[Dict[str, Any]]:
     """
-    从临时存储获取比对结果
+    从临时存储获取比对结果，如果不存在则尝试从数据库获取
     """
     import os
     import json
 
     try:
+        # 首先尝试从文件系统获取
         file_path = f'/app/tmp/{comparison_id}.json'
-        if not os.path.exists(file_path):
-            return None
-
-        with open(file_path, 'r') as f:
-            result = json.load(f)
-        return result
+        if os.path.exists(file_path):
+            with open(file_path, 'r') as f:
+                result = json.load(f)
+            return result
+        
+        # 如果文件不存在，尝试从数据库获取
+        logger.info(f"Result not found in file system for {comparison_id}, checking database...")
+        
+        import psycopg2
+        import psycopg2.extras
+        
+        # 检查是否在 Docker 容器中运行
+        in_docker = os.path.exists('/.dockerenv')
+        default_host = 'postgres' if in_docker else 'localhost'
+        
+        db_host = os.environ.get('DB_HOST', default_host)
+        db_port = int(os.environ.get('DB_PORT', '5432'))
+        db_user = os.environ.get('DB_USER', 'postgres')
+        db_password = os.environ.get('DB_PASSWORD', 'password')
+        db_name = os.environ.get('DB_NAME', 'datadiff')
+        
+        try:
+            conn = psycopg2.connect(
+                host=db_host,
+                port=db_port,
+                user=db_user,
+                password=db_password,
+                dbname=db_name
+            )
+            
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cursor:
+                # 查询比对结果
+                cursor.execute("""
+                    SELECT 
+                        comparison_id,
+                        status,
+                        source_table,
+                        target_table,
+                        rows_compared,
+                        rows_matched,
+                        rows_different,
+                        match_rate,
+                        execution_time_seconds,
+                        created_at,
+                        result_json
+                    FROM data_diff_results.comparison_summary
+                    WHERE comparison_id = %s
+                """, (comparison_id,))
+                
+                row = cursor.fetchone()
+                
+                if row:
+                    # 构建结果对象
+                    result = {
+                        "comparison_id": row['comparison_id'],
+                        "status": row['status'],
+                        "timestamp": row['created_at'].isoformat() if row['created_at'] else None,
+                        "result": {
+                            "summary": {
+                                "source_table": row['source_table'],
+                                "target_table": row['target_table'],
+                                "rows_compared": row['rows_compared'],
+                                "rows_matched": row['rows_matched'],
+                                "rows_different": row['rows_different'],
+                                "match_rate": float(row['match_rate']) if row['match_rate'] else 0.0,
+                                "execution_time": float(row['execution_time_seconds']) if row['execution_time_seconds'] else 0.0,
+                                "data_quality_score": "Good" if float(row['match_rate'] or 0) > 95 else "Fair" if float(row['match_rate'] or 0) > 80 else "Poor"
+                            }
+                        }
+                    }
+                    
+                    # 如果有详细的result_json，合并它
+                    if row['result_json']:
+                        try:
+                            stored_result = json.loads(row['result_json'])
+                            result['result'].update(stored_result)
+                        except:
+                            pass
+                    
+                    # 获取差异样本
+                    cursor.execute("""
+                        SELECT 
+                            key_values,
+                            source_values,
+                            target_values,
+                            difference_type
+                        FROM data_diff_results.comparison_differences
+                        WHERE comparison_id = %s
+                        LIMIT 100
+                    """, (comparison_id,))
+                    
+                    differences = []
+                    for diff_row in cursor.fetchall():
+                        differences.append({
+                            "key": diff_row['key_values'],
+                            "source": diff_row['source_values'],
+                            "target": diff_row['target_values'],
+                            "type": diff_row['difference_type']
+                        })
+                    
+                    if differences:
+                        result['result']['sample_differences'] = differences
+                    
+                    logger.info(f"Successfully retrieved result from database for {comparison_id}")
+                    
+                    # 将结果保存到文件系统以供后续快速访问
+                    try:
+                        os.makedirs('/app/tmp', exist_ok=True)
+                        with open(file_path, 'w') as f:
+                            json.dump(result, f)
+                    except:
+                        pass  # 忽略文件保存错误
+                    
+                    return result
+                
+            conn.close()
+            
+        except Exception as db_error:
+            logger.error(f"Failed to get result from database: {db_error}")
+        
+        return None
+        
     except Exception as e:
         logger.error(f"Failed to get result for comparison {comparison_id}: {e}")
         return None
@@ -148,9 +265,58 @@ def update_task_status(comparison_id: str, status: str) -> None:
     logger.info(f"Updated task {comparison_id} status to {status}")
 
 def get_task_status(comparison_id: str) -> str:
-    """获取任务状态"""
+    """获取任务状态，优先从内存，然后从数据库"""
+    # 首先检查内存中的状态
     if comparison_id in _task_status:
         return _task_status[comparison_id]["status"]
+    
+    # 如果内存中没有，尝试从数据库获取
+    import os
+    import psycopg2
+    
+    try:
+        # 检查是否在 Docker 容器中运行
+        in_docker = os.path.exists('/.dockerenv')
+        default_host = 'postgres' if in_docker else 'localhost'
+        
+        db_host = os.environ.get('DB_HOST', default_host)
+        db_port = int(os.environ.get('DB_PORT', '5432'))
+        db_user = os.environ.get('DB_USER', 'postgres')
+        db_password = os.environ.get('DB_PASSWORD', 'password')
+        db_name = os.environ.get('DB_NAME', 'datadiff')
+        
+        conn = psycopg2.connect(
+            host=db_host,
+            port=db_port,
+            user=db_user,
+            password=db_password,
+            dbname=db_name
+        )
+        
+        with conn.cursor() as cursor:
+            # 查询比对状态
+            cursor.execute("""
+                SELECT status 
+                FROM data_diff_results.comparison_summary 
+                WHERE comparison_id = %s
+            """, (comparison_id,))
+            
+            row = cursor.fetchone()
+            if row:
+                status = row[0]
+                # 将状态缓存到内存中
+                _task_status[comparison_id] = {
+                    "status": status,
+                    "timestamp": datetime.now().isoformat()
+                }
+                conn.close()
+                return status
+                
+        conn.close()
+        
+    except Exception as e:
+        logger.error(f"Failed to get task status from database: {e}")
+    
     return "not_found"
 
 def update_task_progress(comparison_id: str, progress: int, current_step: str = "", estimated_time: str = "") -> None:
