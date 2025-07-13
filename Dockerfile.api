@@ -10,8 +10,11 @@ ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 安装系统依赖和时区数据
-RUN apt-get update && apt-get install -y --no-install-recommends --fix-missing \
+# 安装系统依赖和时区数据 - 禁用代理
+RUN NO_PROXY=* no_proxy=* http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= \
+    apt-get update && \
+    NO_PROXY=* no_proxy=* http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= \
+    apt-get install -y --no-install-recommends \
     gcc \
     g++ \
     git \
