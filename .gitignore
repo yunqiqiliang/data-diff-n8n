@@ -36,6 +36,7 @@ MANIFEST
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt
+api.log
 
 # Unit test / coverage reports
 htmlcov/
@@ -106,6 +107,7 @@ celerybeat.pid
 
 # Environments
 .env
+.env.dev
 .venv
 env/
 venv/
@@ -160,4 +162,9 @@ docker-compose-local.yml
 /scripts
 /reports
 .env.dev
-.env.dev
+
+# SSL证书和私钥
+*.key
+*.crt
+*.pem
+nginx/certs/
