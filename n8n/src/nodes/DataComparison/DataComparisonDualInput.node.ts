@@ -1316,7 +1316,7 @@ export class DataComparisonDualInput implements INodeType {
 	private static async callComparisonAPI(requestData: any, type: string = 'tables'): Promise<any> {
 		const fetch = require('node-fetch');
 		const apiUrl = type === 'schemas' 
-			? 'http://data-diff-api:8000/api/v1/compare/schemas'
+			? 'http://data-diff-api:8000/api/v1/compare/schemas/nested'
 			: 'http://data-diff-api:8000/api/v1/compare/tables/nested';
 		
 		const response = await fetch(apiUrl, {
