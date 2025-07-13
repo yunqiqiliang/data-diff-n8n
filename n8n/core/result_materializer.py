@@ -6,7 +6,7 @@
 import logging
 import json
 from typing import Dict, Any, Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
@@ -616,5 +616,201 @@ class ResultMaterializer:
                     'performance_metrics': metrics
                 }
                 
+        finally:
+            conn.close()
+            
+    async def materialize_schema_comparison(
+        self,
+        comparison_id: str,
+        result: Dict[str, Any],
+        source_config: Dict[str, Any],
+        target_config: Dict[str, Any],
+        workflow_start_time: Optional[str] = None
+    ) -> bool:
+        """
+        物化 Schema 比对结果到数据库
+        
+        Args:
+            comparison_id: 比对ID
+            result: Schema比对结果
+            source_config: 源数据库配置
+            target_config: 目标数据库配置
+            workflow_start_time: 工作流开始时间
+            
+        Returns:
+            是否成功
+        """
+        conn = self._get_connection()
+        try:
+            with conn.cursor() as cursor:
+                # 计算执行时间
+                if workflow_start_time:
+                    try:
+                        start_time = datetime.fromisoformat(workflow_start_time.replace('Z', '+00:00'))
+                        execution_time = (datetime.now() - start_time).total_seconds()
+                    except:
+                        execution_time = None
+                else:
+                    execution_time = None
+                
+                # 提取比对结果信息
+                summary = result.get('summary', {})
+                diff_details = result.get('diff', {})
+                
+                # 插入主记录到 schema_comparison_summary
+                cursor.execute(f"""
+                    INSERT INTO {self.schema_name}.schema_comparison_summary (
+                        comparison_id,
+                        source_connection,
+                        target_connection,
+                        source_schema,
+                        target_schema,
+                        table_differences,
+                        column_differences,
+                        type_differences,
+                        total_differences,
+                        execution_time_seconds,
+                        workflow_execution_seconds,
+                        status,
+                        start_time,
+                        end_time,
+                        schemas_identical,
+                        table_filters
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """, (
+                    comparison_id,
+                    json.dumps(source_config),
+                    json.dumps(target_config),
+                    source_config.get('schema', 'public'),
+                    target_config.get('schema', 'public'),
+                    summary.get('table_differences', 0),
+                    summary.get('column_differences', 0),
+                    summary.get('type_differences', 0),
+                    summary.get('total_differences', 0),
+                    execution_time,
+                    execution_time,  # 暂时使用相同的值
+                    'completed',
+                    datetime.now() - timedelta(seconds=execution_time) if execution_time else datetime.now(),
+                    datetime.now(),
+                    summary.get('total_differences', 0) == 0,
+                    json.dumps({
+                        'source_tables': summary.get('source_tables', 0),
+                        'target_tables': summary.get('target_tables', 0)
+                    })
+                ))
+                
+                # 插入表差异详情
+                table_diffs = diff_details.get('tables', {})
+                
+                # 只在源表中存在的表
+                for table in table_diffs.get('only_in_source', []):
+                    cursor.execute(f"""
+                        INSERT INTO {self.schema_name}.schema_table_differences (
+                            comparison_id,
+                            table_name,
+                            difference_type,
+                            details
+                        ) VALUES (%s, %s, %s, %s)
+                    """, (
+                        comparison_id,
+                        table,
+                        'only_in_source',
+                        json.dumps({'source_only': True})
+                    ))
+                
+                # 只在目标表中存在的表
+                for table in table_diffs.get('only_in_target', []):
+                    cursor.execute(f"""
+                        INSERT INTO {self.schema_name}.schema_table_differences (
+                            comparison_id,
+                            table_name,
+                            difference_type,
+                            details
+                        ) VALUES (%s, %s, %s, %s)
+                    """, (
+                        comparison_id,
+                        table,
+                        'only_in_target',
+                        json.dumps({'target_only': True})
+                    ))
+                
+                # 插入列差异详情
+                for table_name, table_diff in table_diffs.get('tables_with_differences', {}).items():
+                    columns_diff = table_diff.get('columns', {})
+                    
+                    # 只在源表中的列
+                    for col in columns_diff.get('only_in_source', []):
+                        cursor.execute(f"""
+                            INSERT INTO {self.schema_name}.schema_column_differences (
+                                comparison_id,
+                                table_name,
+                                column_name,
+                                difference_type,
+                                source_type,
+                                target_type,
+                                details
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            comparison_id,
+                            table_name,
+                            col,
+                            'only_in_source',
+                            None,
+                            None,
+                            json.dumps({'source_only': True})
+                        ))
+                    
+                    # 只在目标表中的列
+                    for col in columns_diff.get('only_in_target', []):
+                        cursor.execute(f"""
+                            INSERT INTO {self.schema_name}.schema_column_differences (
+                                comparison_id,
+                                table_name,
+                                column_name,
+                                difference_type,
+                                source_type,
+                                target_type,
+                                details
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            comparison_id,
+                            table_name,
+                            col,
+                            'only_in_target',
+                            None,
+                            None,
+                            json.dumps({'target_only': True})
+                        ))
+                    
+                    # 类型不同的列
+                    for col_name, col_diff in columns_diff.get('type_differences', {}).items():
+                        cursor.execute(f"""
+                            INSERT INTO {self.schema_name}.schema_column_differences (
+                                comparison_id,
+                                table_name,
+                                column_name,
+                                difference_type,
+                                source_type,
+                                target_type,
+                                details
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            comparison_id,
+                            table_name,
+                            col_name,
+                            'type_mismatch',
+                            col_diff.get('source_type'),
+                            col_diff.get('target_type'),
+                            json.dumps(col_diff)
+                        ))
+                
+                conn.commit()
+                self.logger.info(f"Successfully materialized schema comparison {comparison_id}")
+                return True
+                
+        except Exception as e:
+            conn.rollback()
+            self.logger.error(f"Failed to materialize schema comparison: {e}", exc_info=True)
+            raise
         finally:
             conn.close()

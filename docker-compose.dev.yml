@@ -13,6 +13,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/datadiff
       - LOG_LEVEL=INFO
+      - TZ=Asia/Shanghai
     volumes:
       - ./n8n:/app/n8n
     depends_on:
@@ -66,6 +67,7 @@ services:
       - POSTGRES_DB=postgres
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=password
+      - TZ=Asia/Shanghai
     ports:
       - "5432:5432"
     volumes:
@@ -84,6 +86,7 @@ services:
       - GF_SECURITY_ADMIN_USER=admin
       - GF_SECURITY_ADMIN_PASSWORD=admin123
       - GF_INSTALL_PLUGINS=grafana-piechart-panel
+      - TZ=Asia/Shanghai
     volumes:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
@@ -100,6 +103,8 @@ services:
     image: prom/prometheus:latest
     ports:
       - "9091:9090" # 将主机端口从 9090 更改为 9091，避免端口冲突
+    environment:
+      - TZ=Asia/Shanghai
     volumes:
       - prometheus_data:/prometheus
       - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml # 精确挂载配置文件

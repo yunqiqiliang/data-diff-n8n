@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PIP_NO_CACHE_DIR=1
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# 安装系统依赖
+# 安装系统依赖和时区数据
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     g++ \
@@ -19,7 +19,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev \
     python3-dev \
     build-essential \
+    tzdata \
     && rm -rf /var/lib/apt/lists/*
+
+# 设置时区为东八区（上海时间）
+ENV TZ=Asia/Shanghai
+RUN ln -sf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 设置 pip 使用阿里云镜像源 - 禁用代理
 RUN NO_PROXY=* no_proxy=* pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
