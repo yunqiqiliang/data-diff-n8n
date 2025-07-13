@@ -12,14 +12,11 @@ services:
       - 114.114.114.114
     environment:
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/datadiff
-      - REDIS_URL=redis://redis:6379
       - LOG_LEVEL=INFO
     volumes:
       - ./n8n:/app/n8n
-      - ./exports:/app/exports
     depends_on:
       - postgres
-      - redis
     networks:
       - datadiff-network
     restart: unless-stopped
@@ -78,18 +75,6 @@ services:
       - datadiff-network
     restart: unless-stopped
 
-  # Redis 缓存
-  redis:
-    image: redis:7-alpine
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-    networks:
-      - datadiff-network
-    restart: unless-stopped
-    command: redis-server --appendonly yes
-
   # Grafana 监控仪表板
   grafana:
     image: grafana/grafana:latest
@@ -103,6 +88,7 @@ services:
       - grafana_data:/var/lib/grafana
       - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
       - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+      - ./monitoring/grafana-dashboards:/var/lib/grafana/dashboards
     depends_on:
       - prometheus
     networks:
@@ -127,32 +113,6 @@ services:
       - datadiff-network
     restart: unless-stopped
 
-  # Jupyter Lab 用于数据分析
-  jupyter:
-    image: jupyter/datascience-notebook:latest
-    ports:
-      - "8889:8888" # 将主机端口从 8888 更改为 8889，避免端口冲突
-    environment:
-      - JUPYTER_ENABLE_LAB=yes
-      - JUPYTER_TOKEN=datadiff123
-    volumes:
-      - jupyter_data:/home/jovyan/work
-      - ./notebooks:/home/jovyan/work/notebooks
-      - ./n8n:/home/jovyan/work/n8n
-    networks:
-      - datadiff-network
-    restart: unless-stopped
-
-  # Mailhog SMTP 测试服务
-  mailhog:
-    image: mailhog/mailhog:latest
-    ports:
-      - "1025:1025"  # SMTP
-      - "8025:8025"  # Web UI
-    networks:
-      - datadiff-network
-    restart: unless-stopped
-
   # Nginx 反向代理
   nginx:
     image: nginx:alpine
@@ -161,6 +121,7 @@ services:
       - "443:443"
     volumes:
       - ./nginx/nginx.conf:/etc/nginx/nginx.conf # 修正配置文件路径
+      - ./nginx/index.html:/usr/share/nginx/html/index.html # 挂载首页
       - ./nginx/certs:/etc/nginx/certs # 挂载证书目录
     depends_on:
       - data-diff-api
@@ -171,11 +132,9 @@ services:
 
 volumes:
   postgres_data:
-  redis_data:
   n8n_data:
   grafana_data:
   prometheus_data:
-  jupyter_data:
 
 networks:
   datadiff-network:

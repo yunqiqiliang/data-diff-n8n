@@ -42,8 +42,6 @@
   - N8N 工作流: http://localhost:5678
   - Grafana 监控: http://localhost:3000
   - Prometheus: http://localhost:9091
-  - Jupyter Lab: http://localhost:8889
-  - Mailhog: http://localhost:8025
   - Nginx (HTTP): http://localhost:80
   - Nginx (HTTPS): https://localhost:443
 

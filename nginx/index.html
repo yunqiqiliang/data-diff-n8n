@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Data-Diff N8N 集成开发环境</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #333;
+        }
+        
+        .container {
+            background: rgba(255, 255, 255, 0.95);
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            padding: 3rem;
+            max-width: 800px;
+            width: 90%;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #5a67d8;
+            margin-bottom: 1rem;
+            font-size: 2.5rem;
+        }
+        
+        .subtitle {
+            text-align: center;
+            color: #718096;
+            margin-bottom: 3rem;
+            font-size: 1.1rem;
+        }
+        
+        .services {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+        
+        .service-card {
+            background: #f7fafc;
+            border: 2px solid #e2e8f0;
+            border-radius: 12px;
+            padding: 1.5rem;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            color: inherit;
+        }
+        
+        .service-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0, 0, 0, 0.1);
+            border-color: #5a67d8;
+        }
+        
+        .service-icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+            display: block;
+        }
+        
+        .service-name {
+            font-weight: bold;
+            font-size: 1.2rem;
+            color: #2d3748;
+            margin-bottom: 0.5rem;
+        }
+        
+        .service-desc {
+            color: #718096;
+            font-size: 0.9rem;
+            line-height: 1.4;
+        }
+        
+        .section {
+            margin-bottom: 2.5rem;
+        }
+        
+        .section-title {
+            font-size: 1.5rem;
+            color: #4a5568;
+            margin-bottom: 1rem;
+            padding-bottom: 0.5rem;
+            border-bottom: 2px solid #e2e8f0;
+        }
+        
+        .quick-links {
+            display: flex;
+            gap: 1rem;
+            flex-wrap: wrap;
+            justify-content: center;
+            margin-top: 2rem;
+        }
+        
+        .quick-link {
+            background: #5a67d8;
+            color: white;
+            padding: 0.5rem 1.5rem;
+            border-radius: 8px;
+            text-decoration: none;
+            font-size: 0.9rem;
+            transition: background 0.3s ease;
+        }
+        
+        .quick-link:hover {
+            background: #4c51bf;
+        }
+        
+        .info-box {
+            background: #ebf8ff;
+            border: 1px solid #90cdf4;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-top: 2rem;
+        }
+        
+        .info-box h3 {
+            color: #2b6cb0;
+            margin-bottom: 0.5rem;
+        }
+        
+        .info-box p {
+            color: #2c5282;
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Data-Diff N8N</h1>
+        <p class="subtitle">数据比对与工作流自动化平台</p>
+        
+        <div class="section">
+            <h2 class="section-title">核心服务</h2>
+            <div class="services">
+                <a href="/n8n/" class="service-card">
+                    <span class="service-icon">🔄</span>
+                    <div class="service-name">N8N 工作流</div>
+                    <div class="service-desc">可视化工作流编排平台</div>
+                </a>
+                
+                <a href="/api/docs" class="service-card">
+                    <span class="service-icon">📊</span>
+                    <div class="service-name">Data-Diff API</div>
+                    <div class="service-desc">数据比对 REST API</div>
+                </a>
+                
+                <a href="http://localhost:3000" class="service-card" target="_blank">
+                    <span class="service-icon">📈</span>
+                    <div class="service-name">Grafana 监控</div>
+                    <div class="service-desc">系统监控仪表板<br><small>端口: 3000</small></div>
+                </a>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2 class="section-title">开发工具</h2>
+            <div class="services">
+                <a href="/prometheus/" class="service-card">
+                    <span class="service-icon">🎯</span>
+                    <div class="service-name">Prometheus</div>
+                    <div class="service-desc">指标查询与分析</div>
+                </a>
+                
+            </div>
+        </div>
+        
+        <div class="info-box">
+            <h3>🔐 默认登录信息</h3>
+            <p>
+                <strong>N8N:</strong> admin / admin123 &nbsp;|&nbsp;
+                <strong>Grafana:</strong> admin / admin123
+            </p>
+        </div>
+        
+        <div class="quick-links">
+            <a href="https://github.com/yunqiqiliang/data-diff-n8n" class="quick-link" target="_blank">📚 项目文档</a>
+            <a href="/api/docs" class="quick-link">🔍 API 文档</a>
+            <a href="http://localhost:3000" class="quick-link" target="_blank">📊 监控面板</a>
+            <a href="/n8n/" class="quick-link">⚡ 快速开始</a>
+        </div>
+    </div>
+</body>
+</html>
